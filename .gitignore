@@ -1,0 +1,44 @@
+# =========================================
+# The Neuro-Genesis Engine: .gitignore
+# =========================================
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Secrets & Configuration
+.env
+*.pem
+secrets.json
+
+# PyTorch & Machine Learning Weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# Dynamic Logs & Telemetry
+logs/
+runs/
+wandb/
+lightning_logs/
+*.log
+
+# Data (Raw/Simulated from Featherless)
+data/
+datasets/
+*.csv
+*.jsonl
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
