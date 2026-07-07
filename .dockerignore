@@ -1,0 +1,21 @@
+# Keep the build context lean and prevent local (CUDA/CPU) artifacts from
+# leaking into the ROCm image.
+.git
+.gitignore
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.pytest_cache
+.venv
+venv
+env
+*.egg-info
+build
+dist
+
+# Local, CUDA-oriented pins must NOT influence the container. torch inside the
+# image comes from the ROCm base + requirements-docker.txt only.
+requirements-lock.txt
+plan.pdf
+*.md
+!README.md

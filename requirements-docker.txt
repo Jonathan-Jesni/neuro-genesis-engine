@@ -1,0 +1,25 @@
+# =============================================================================
+# Container dependency lock -- NON-TORCH ONLY.
+# =============================================================================
+# This file is the ONLY requirements file pip resolves inside the Docker build,
+# and it deliberately DOES NOT contain torch / torchvision / torchaudio.
+#
+# Why torch is excluded here (read before adding it back):
+#   The container is built FROM an official ROCm PyTorch image, which already
+#   ships a torch build compiled against the exact ROCm version in that image.
+#   That is the known-good, GPU-enabled pairing we want.
+#
+#   The repo's top-level requirements.txt pins `torch>=2.2` loosely and
+#   deliberately. If we ever ran `pip install -r requirements.txt` inside the
+#   container, pip would resolve `torch>=2.2` against the DEFAULT PyPI index and
+#   happily install a CPU-only (or CUDA) wheel ON TOP OF the ROCm torch --
+#   silently clobbering GPU support with a wheel that has no HIP backend. The
+#   container would then "work" on CPU and fail to see the AMD GPU at all.
+#
+#   So: torch comes from the base image (never reinstalled), and only the
+#   remaining, backend-agnostic dependencies live here.
+#
+# If the demo grows Python deps (e.g. a web frontend, numpy, fastapi), add them
+# to THIS file -- never torch/torchvision/torchaudio.
+
+pytest>=7.0

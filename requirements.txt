@@ -1,0 +1,7 @@
+# Neuro-Genesis Engine dependencies.
+# PyTorch 2.2+ for torch.autocast(device_type=...), Normal.cdf, and stable
+# ModuleList / optimizer param_group semantics used by the MoE gate.
+torch>=2.2
+
+# Test-only:
+pytest>=7.0
