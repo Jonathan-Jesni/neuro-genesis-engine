@@ -8,6 +8,7 @@ Or plainly: python tests/test_orchestrator.py   (minimal runner at the bottom,
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -293,6 +294,232 @@ def test_end_to_end_ood_spike_grows_expert():
         assert orch.spikes_seen >= 1, "OOD batch did not register as a spike"
         assert gate.num_experts == len(experts) == 4 + orch.registrations
         assert orch.registrations >= 1
+
+
+# ---------------------------------------------------------------------------
+# 6. Checkpoint / resume
+# ---------------------------------------------------------------------------
+def _base_expert_factory():
+    return torch.nn.Linear(IN_DIM, OUT_DIM)
+
+
+def test_checkpoint_roundtrip_resume():
+    with tempfile.TemporaryDirectory() as tmp:
+        log1 = os.path.join(tmp, "run1.jsonl")
+        ck = os.path.join(tmp, "ck.pt")
+        gate, experts, opt, orch = _make_orchestrator(
+            log1, detector=StubDetector(fire_on_calls=(2,))
+        )
+        try:
+            orch.run(5, _data_fn)  # registration at step 2: 4 -> 5 experts
+            assert gate.num_experts == len(experts) == 5
+            orch.save_checkpoint(ck)
+        finally:
+            orch.logger.close()
+
+        base_w = experts[0].weight.detach().clone()
+        gen_w = experts[4].fc1.weight.detach().clone()  # GeneratedExpertStep2
+        exp_avg = opt.state[gate.w_gate]["exp_avg"].detach().clone()
+        step_before = orch.step_count
+
+        log2 = os.path.join(tmp, "run2.jsonl")
+        orch2 = TrainingOrchestrator.from_checkpoint(
+            ck,
+            base_expert_factory=_base_expert_factory,
+            log_path=log2,
+            detector=StubDetector(fire_on_calls=()),
+        )
+        try:
+            g2, e2 = orch2.gate, orch2.experts
+            # Counts in lockstep, step counter restored.
+            assert g2.num_experts == len(e2) == 5
+            assert orch2.step_count == step_before == 5
+            assert orch2.registrations == 1
+            # Specific weights match EXACTLY -- base expert AND the expert
+            # that was dynamically generated before the checkpoint.
+            assert torch.equal(e2[0].weight.detach(), base_w)
+            assert torch.equal(e2[4].fc1.weight.detach(), gen_w)
+            # Adam momentum survived the resume (same reasoning as the
+            # original optimizer-remap work: cold moments = lost history).
+            assert torch.equal(opt2_state := orch2.optimizer.state[g2.w_gate]["exp_avg"], exp_avg)
+            assert opt2_state is not exp_avg  # genuinely reloaded, not aliased
+            # Resume training: step numbering continues, losses stay finite.
+            results = orch2.run(5, _data_fn)
+            assert [r.step for r in results] == [6, 7, 8, 9, 10]
+            assert all(math.isfinite(r.loss) for r in results)
+        finally:
+            orch2.logger.close()
+        steps2 = [e["step"] for e in _read_events(log2) if e["event"] == "step"]
+        assert steps2 == [6, 7, 8, 9, 10]
+
+
+def test_resumed_detector_keeps_rolling_baseline():
+    from core.orchestrator import RollingSpikeDetector as RSD
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "run.jsonl")
+        ck = os.path.join(tmp, "ck.pt")
+        det = RSD(window=20, z_threshold=4.0, min_history=5)
+        # Establish a real rolling baseline (well past min_history).
+        for i in range(12):
+            assert det.update(1.0 + 0.01 * (i % 3)) is None
+        history_before = list(det._history)
+
+        gate, experts, opt, orch = _make_orchestrator(log, detector=det)
+        try:
+            orch.save_checkpoint(ck)
+        finally:
+            orch.logger.close()
+
+        log2 = os.path.join(tmp, "run2.jsonl")
+        orch2 = TrainingOrchestrator.from_checkpoint(
+            ck, base_expert_factory=_base_expert_factory, log_path=log2
+        )
+        try:
+            det2 = orch2.detector
+            # The rolling window came back exactly -- not a fresh detector.
+            assert list(det2._history) == history_before
+            # No misfire on a normal loss right after resume...
+            assert det2.update(1.01) is None
+            # ...and a genuine outlier fires IMMEDIATELY. A reset (empty)
+            # window could not do this until min_history refilled -- that is
+            # the missed-spike regression this test guards against.
+            spike = det2.update(50.0)
+            assert spike is not None and spike.z_score > 4.0
+        finally:
+            orch2.logger.close()
+
+
+def test_periodic_checkpointing_during_run():
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "run.jsonl")
+        ck = os.path.join(tmp, "ck.pt")
+        gate, experts, opt, orch = _make_orchestrator(
+            log,
+            detector=StubDetector(fire_on_calls=()),
+            checkpoint_path=ck,
+            checkpoint_every_n_steps=2,
+        )
+        try:
+            orch.run(5, _data_fn)
+        finally:
+            orch.logger.close()
+        events = _read_events(log)
+        saves = [e for e in events if e["event"] == "checkpoint_saved"]
+        # Periodic at steps 2 and 4, final save at run end (step 5).
+        assert [e["step"] for e in saves] == [2, 4, 5]
+        # Saves only ever reflect a COMPLETED step (loop-level checkpointing).
+        completed = {e["step"] for e in events if e["event"] == "step"}
+        assert all(e["step"] in completed for e in saves)
+        # Atomic write: final file present, no temp file left behind.
+        assert os.path.exists(ck)
+        assert not os.path.exists(ck + ".tmp")
+        ckpt = torch.load(ck, weights_only=True)
+        assert ckpt["step_count"] == 5
+
+
+def test_checkpoint_count_mismatch_raises():
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "run.jsonl")
+        ck = os.path.join(tmp, "ck.pt")
+        gate, experts, opt, orch = _make_orchestrator(
+            log, detector=StubDetector(fire_on_calls=(2,))
+        )
+        try:
+            orch.run(3, _data_fn)  # one registration -> 5 experts
+            orch.save_checkpoint(ck)
+        finally:
+            orch.logger.close()
+
+        ckpt = torch.load(ck, weights_only=True)
+        ckpt["num_experts"] = 7  # corrupt the claimed count
+        torch.save(ckpt, ck)
+
+        try:
+            TrainingOrchestrator.from_checkpoint(
+                ck,
+                base_expert_factory=_base_expert_factory,
+                log_path=os.path.join(tmp, "run2.jsonl"),
+            )
+            assert False, "expected ValueError on count mismatch"
+        except ValueError as exc:
+            msg = str(exc)
+            assert "7" in msg and "5" in msg  # names both disagreeing counts
+
+
+def test_interrupted_run_saves_checkpoint():
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "run.jsonl")
+        ck = os.path.join(tmp, "ck.pt")
+        gate, experts, opt, orch = _make_orchestrator(
+            log, detector=StubDetector(fire_on_calls=()), checkpoint_path=ck
+        )
+
+        def interrupting_data_fn(step):
+            if step == 3:  # quota kill mid-run, delivered between steps
+                raise KeyboardInterrupt
+            return _data_fn(step)
+
+        try:
+            try:
+                orch.run(5, interrupting_data_fn)
+                assert False, "expected KeyboardInterrupt to propagate"
+            except KeyboardInterrupt:
+                pass
+        finally:
+            orch.logger.close()
+
+        events = _read_events(log)
+        assert any(e["event"] == "run_interrupted" for e in events)
+        assert os.path.exists(ck)
+        # The checkpoint reflects the last COMPLETED step and resumes cleanly.
+        orch2 = TrainingOrchestrator.from_checkpoint(
+            ck,
+            base_expert_factory=_base_expert_factory,
+            log_path=os.path.join(tmp, "run2.jsonl"),
+            detector=StubDetector(fire_on_calls=()),
+        )
+        try:
+            assert orch2.step_count == 2
+            results = orch2.run(2, _data_fn)
+            assert [r.step for r in results] == [3, 4]
+        finally:
+            orch2.logger.close()
+
+
+def test_optimizer_group_mismatch_raises():
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "run.jsonl")
+        ck = os.path.join(tmp, "ck.pt")
+        gate, experts, opt, orch = _make_orchestrator(
+            log, detector=StubDetector(fire_on_calls=(2,))
+        )
+        try:
+            orch.run(3, _data_fn)  # registration -> optimizer has 2 groups
+            assert len(opt.param_groups) == 2
+            orch.save_checkpoint(ck)
+        finally:
+            orch.logger.close()
+
+        # Corrupt the stored optimizer structure: drop the generated expert's
+        # param group and its state entries. Without the guard,
+        # load_state_dict would NOT raise -- it matches by position and would
+        # silently attach the wrong momentum to the wrong params.
+        ckpt = torch.load(ck, weights_only=True)
+        dropped = ckpt["optimizer_state"]["param_groups"].pop()
+        for pid in dropped["params"]:
+            ckpt["optimizer_state"]["state"].pop(pid, None)
+        torch.save(ckpt, ck)
+
+        try:
+            TrainingOrchestrator.from_checkpoint(
+                ck,
+                base_expert_factory=_base_expert_factory,
+                log_path=os.path.join(tmp, "run2.jsonl"),
+            )
+            assert False, "expected ValueError on optimizer group mismatch"
+        except ValueError as exc:
+            assert "group" in str(exc).lower()
 
 
 # ---------------------------------------------------------------------------

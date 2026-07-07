@@ -40,6 +40,16 @@ Logging: every step, spike, candidate generation, registration outcome, and
 expert-count change is appended to a JSON-lines file with a wall-clock
 timestamp. The log alone is sufficient to reconstruct "what happened and
 when" for a run (see ``tests/test_orchestrator.py``).
+
+Checkpoint/resume: built for time-boxed shared compute (hard quota kills at
+any moment, persistent storage survives). ``save_checkpoint`` writes an
+atomic, fully-consistent snapshot -- only ever between train steps -- and
+``TrainingOrchestrator.from_checkpoint`` reconstructs everything for exact
+resumption: the grown gate, every registered expert (rebuilt from its stored
+SOURCE, since a generated class is not reconstructible from a state_dict
+alone), Adam momentum, counters, and the spike detector's rolling baseline.
+See ``from_checkpoint``'s docstring for the rebuild-before-load ordering and
+the optimizer group-structure guard.
 """
 
 from __future__ import annotations
@@ -48,6 +58,7 @@ import collections
 import hashlib
 import json
 import math
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,6 +159,36 @@ class RollingSpikeDetector:
         self._history.append(loss)
         return None
 
+    # -- checkpoint support ---------------------------------------------------
+    def get_state(self) -> dict[str, Any]:
+        """Config + rolling-window contents, JSON/torch.save-safe.
+
+        The window contents matter: resuming with an empty window would leave
+        the detector unable to fire until ``min_history`` refills -- i.e. it
+        would MISS genuine spikes right after a resume.
+        """
+        return {
+            "window": self.window,
+            "z_threshold": self.z_threshold,
+            "min_history": self.min_history,
+            "eps": self.eps,
+            "rel_floor": self.rel_floor,
+            "history": list(self._history),
+        }
+
+    @classmethod
+    def from_state(cls, state: dict[str, Any]) -> "RollingSpikeDetector":
+        """Reconstruct a detector with its rolling baseline intact."""
+        det = cls(
+            window=state["window"],
+            z_threshold=state["z_threshold"],
+            min_history=state["min_history"],
+            eps=state["eps"],
+            rel_floor=state["rel_floor"],
+        )
+        det._history.extend(state["history"])
+        return det
+
 
 # =============================================================================
 # Failure context + placeholder generator
@@ -186,6 +227,39 @@ class GeneratedExpertStep{ctx.step}(nn.Module):
     def forward(self, x):
         return self.fc2(F.gelu(self.fc1(x)))
 """
+
+
+def _rebuild_generated_expert(source: str, class_name: str) -> nn.Module:
+    """Re-instantiate a checkpointed generated expert from its source string.
+
+    Sources stored in a checkpoint already passed the FULL foundry validation
+    pipeline (static screen, sandboxed exec, interface contract, smoke test)
+    at original registration time, so resume only needs to re-exec and
+    instantiate. The exec still runs in the same restricted namespace the
+    foundry used (reusing its builtin whitelist and filename stamp) so a
+    tampered checkpoint gets no wider capabilities than a fresh registration
+    -- but note the checkpoint file itself must come from trusted storage;
+    this is consistency protection, not an authentication mechanism.
+    """
+    from core.moe import dynamic_gating as _dg
+
+    compiled = compile(source, _dg._GENERATED_FILENAME, "exec")
+    namespace: dict[str, Any] = {
+        "__builtins__": dict(_dg._SAFE_BUILTINS),
+        "__name__": _dg._GENERATED_FILENAME,
+        "torch": torch,
+        "nn": nn,
+        "F": F,
+        "math": math,
+        "Tensor": Tensor,
+    }
+    exec(compiled, namespace)  # noqa: S102 - same sandbox as the foundry
+    obj = namespace.get(class_name)
+    if not (isinstance(obj, type) and issubclass(obj, nn.Module)):
+        raise ValueError(
+            f"checkpointed source does not define nn.Module subclass {class_name!r}"
+        )
+    return obj()
 
 
 # =============================================================================
@@ -272,6 +346,8 @@ class TrainingOrchestrator:
         task_loss_fn: Callable[[Tensor, Tensor], Tensor] = F.mse_loss,
         max_experts: Optional[int] = None,
         spike_cooldown_steps: int = 10,
+        checkpoint_path: Optional[Union[str, Path]] = None,
+        checkpoint_every_n_steps: Optional[int] = None,
     ) -> None:
         self.gate = gate
         self.experts = experts
@@ -282,6 +358,8 @@ class TrainingOrchestrator:
         self.task_loss_fn = task_loss_fn
         self.max_experts = max_experts
         self.spike_cooldown_steps = spike_cooldown_steps
+        self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
+        self.checkpoint_every_n_steps = checkpoint_every_n_steps
         self.logger = JsonlLogger(log_path)
 
         self.step_count = 0
@@ -290,6 +368,14 @@ class TrainingOrchestrator:
         self.spikes_seen = 0
         self.registrations = 0
         self.rejections = 0
+
+        # Checkpoint bookkeeping. Base experts (constructed by the caller,
+        # arbitrary architecture) vs generated experts (registered through the
+        # foundry, reconstructible from their stored SOURCE): a state_dict
+        # alone cannot rebuild a generated class, so we retain every
+        # successfully registered source for from_checkpoint.
+        self._n_base_experts = len(experts)
+        self._registered_sources: list[dict[str, str]] = []
 
     # -- forward ---------------------------------------------------------
     def _moe_forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
@@ -439,6 +525,11 @@ class TrainingOrchestrator:
 
         self.registrations += 1
         self._last_registration_step = step
+        # Retain the source: it is the only way from_checkpoint can rebuild
+        # this expert's architecture before loading its weights.
+        self._registered_sources.append(
+            {"class_name": reg.class_name, "source": source}
+        )
         self.logger.log(
             "registration_success",
             step=step,
@@ -455,13 +546,309 @@ class TrainingOrchestrator:
         )
         return True
 
+    # -- checkpoint / resume ----------------------------------------------------
+    def save_checkpoint(self, path: Optional[Union[str, Path]] = None) -> Path:
+        """Atomically write a full-resumption checkpoint.
+
+        Call this ONLY between ``train_step`` calls, never from inside one --
+        that is what guarantees a checkpoint never captures a state with
+        gradients half-applied. ``run()`` honours this by checkpointing at
+        loop level only.
+
+        The state capture runs under ``gate.expand_lock`` so no expansion can
+        tear the gate/optimizer pairing mid-snapshot. The write is atomic
+        (temp file + ``os.replace``): an interrupt mid-write can never
+        corrupt the previous good checkpoint on shared storage.
+        """
+        target = Path(path) if path is not None else self.checkpoint_path
+        if target is None:
+            raise ValueError(
+                "no checkpoint path: pass `path` or set checkpoint_path on the "
+                "orchestrator"
+            )
+
+        with self.gate.expand_lock:
+            detector_state = None
+            get_state = getattr(self.detector, "get_state", None)
+            if callable(get_state):
+                detector_state = get_state()
+            payload: dict[str, Any] = {
+                "version": 1,
+                "step_count": self.step_count,
+                "num_experts": self.gate.num_experts,
+                "gate_config": {
+                    "in_features": self.gate.in_features,
+                    "num_experts": self.gate.num_experts,
+                    "k": self.gate.k,
+                    "loss_coef": self.gate.loss_coef,
+                    "noise_eps": self.gate.noise_eps,
+                    "w_gate_init_std": self.gate.w_gate_init_std,
+                },
+                "gate_state": self.gate.state_dict(),
+                "n_base_experts": self._n_base_experts,
+                "generated_experts": [dict(e) for e in self._registered_sources],
+                "experts_state": self.experts.state_dict(),
+                "optimizer_state": self.optimizer.state_dict(),
+                "detector_state": detector_state,
+                "counters": {
+                    "spikes_seen": self.spikes_seen,
+                    "registrations": self.registrations,
+                    "rejections": self.rejections,
+                    "last_registration_step": self._last_registration_step,
+                },
+                "orch_config": {
+                    "max_experts": self.max_experts,
+                    "spike_cooldown_steps": self.spike_cooldown_steps,
+                },
+                "foundry_config": {
+                    "expert_input_dim": self.foundry.expert_input_dim,
+                    "expert_output_dim": self.foundry.expert_output_dim,
+                    "timeout_s": self.foundry.timeout_s,
+                    "smoke_batch": self.foundry.smoke_batch,
+                },
+            }
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.parent / (target.name + ".tmp")
+        torch.save(payload, tmp)
+        os.replace(tmp, target)
+        self.logger.log("checkpoint_saved", step=self.step_count, path=str(target))
+        return target
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        path: Union[str, Path],
+        *,
+        base_expert_factory: Callable[[], nn.Module],
+        log_path: Union[str, Path],
+        expert_source_generator: Callable[[FailureContext], str] = template_mlp_expert_source,
+        optimizer_factory: Optional[Callable[[list], torch.optim.Optimizer]] = None,
+        detector: Optional[Any] = None,
+        task_loss_fn: Callable[[Tensor, Tensor], Tensor] = F.mse_loss,
+        map_location: Any = None,
+        checkpoint_path: Optional[Union[str, Path]] = None,
+        checkpoint_every_n_steps: Optional[int] = None,
+    ) -> "TrainingOrchestrator":
+        """Reconstruct an orchestrator for exact resumption from a checkpoint.
+
+        REBUILD-BEFORE-LOAD ORDERING (read this before touching the method --
+        it is the part most likely to be gotten wrong):
+
+        A ``state_dict`` can only be loaded into a module whose structure
+        already matches it. But the checkpoint describes a gate that has been
+        EXPANDED beyond its construction size, and an expert ``ModuleList``
+        that has GROWN with dynamically generated classes. Both must therefore
+        be rebuilt to their checkpointed shape FIRST, and only then loaded:
+
+          1. Construct the gate at the *checkpointed* ``num_experts`` (stored
+             gate config), not the original construction size.
+          2. Rebuild the experts list to the exact checkpointed length:
+             ``n_base_experts`` modules from ``base_expert_factory`` (the
+             caller must supply the same architecture used at original
+             construction -- the orchestrator cannot know it), then one
+             re-exec'd module per stored generated-expert source, in
+             registration order (order defines state_dict keys AND optimizer
+             param-group positions).
+          3. Only now ``load_state_dict`` the gate and the experts -- the
+             keys and shapes finally match.
+          4. Construct the foundry (its constructor validates that gate and
+             expert counts agree).
+          5. Rebuild the optimizer with the exact save-time group structure:
+             group 0 = ``list(gate.parameters()) + base expert params`` (the
+             documented construction pattern), then one ``add_param_group``
+             per parameterized generated expert, in order. Then verify the
+             structure (see guard below) and ``load_state_dict`` -- which
+             restores Adam moments AND per-group hyperparams (lr, betas).
+          6. Restore counters, cooldown marker, sources, detector state.
+
+        SILENT-CORRUPTION GUARD: ``optimizer.load_state_dict`` matches state
+        to parameters BY POSITION, not by name. If the rebuilt group
+        structure deviates from the save-time structure it will not raise --
+        it will silently attach momentum buffers to the wrong parameters.
+        This method therefore verifies, before loading, that (a) the rebuilt
+        group count and per-group param counts match what the reconstructed
+        gate/experts imply, and (b) they match the checkpoint's stored
+        ``param_groups`` -- and raises ``ValueError`` on any disagreement.
+
+        Args:
+            path: Checkpoint file written by :meth:`save_checkpoint`.
+            base_expert_factory: Zero-arg callable returning ONE base expert
+                with the same architecture used at original construction.
+            log_path: JSONL log for the resumed run (appends if it exists).
+            expert_source_generator: Generator for FUTURE spikes (not needed
+                to rebuild past experts -- their sources are in the checkpoint).
+            optimizer_factory: ``params -> Optimizer``; defaults to Adam.
+                Hyperparameters are overwritten by the checkpoint on load.
+            detector: Overrides the checkpointed detector state if given.
+            map_location: Forwarded to ``torch.load`` (e.g. "cpu").
+            checkpoint_path: Where the resumed run saves its own checkpoints;
+                defaults to ``path`` (resume-in-place).
+            checkpoint_every_n_steps: Periodic-save cadence for the resumed run.
+
+        Raises:
+            ValueError: On any consistency violation -- expert-count
+                disagreement or optimizer group-structure mismatch. Never
+                proceeds silently.
+        """
+        # weights_only=True: the checkpoint contains only tensors/containers,
+        # so loading it is never a pickle-code-execution vector. (The expert
+        # SOURCES inside are re-exec'd, but only through the same restricted
+        # namespace the foundry used -- see _rebuild_generated_expert.)
+        ckpt = torch.load(path, map_location=map_location, weights_only=True)
+
+        # -- 1. gate at checkpointed size --------------------------------------
+        gc = ckpt["gate_config"]
+        gate = DynamicNoisyTopKGate(
+            gc["in_features"],
+            gc["num_experts"],
+            k=gc["k"],
+            loss_coef=gc["loss_coef"],
+            noise_eps=gc["noise_eps"],
+            w_gate_init_std=gc["w_gate_init_std"],
+        )
+
+        # -- 2. experts rebuilt to checkpointed length, BEFORE any load --------
+        n_base = ckpt["n_base_experts"]
+        generated = ckpt["generated_experts"]
+        experts = nn.ModuleList(base_expert_factory() for _ in range(n_base))
+        for entry in generated:
+            experts.append(
+                _rebuild_generated_expert(entry["source"], entry["class_name"])
+            )
+
+        # Loud consistency check: checkpointed count vs what we rebuilt.
+        n_ckpt = ckpt["num_experts"]
+        if not (gate.num_experts == len(experts) == n_ckpt):
+            raise ValueError(
+                f"checkpoint inconsistency: checkpoint claims num_experts="
+                f"{n_ckpt}, but the rebuilt gate has {gate.num_experts} and the "
+                f"rebuilt expert list has {len(experts)} "
+                f"({n_base} base + {len(generated)} generated). Refusing to "
+                f"load state into mismatched structures."
+            )
+
+        # -- 3. load module state (shapes/keys now match) -----------------------
+        gate.load_state_dict(ckpt["gate_state"])
+        experts.load_state_dict(ckpt["experts_state"])
+
+        # -- 4. foundry (validates gate/expert count agreement itself) ----------
+        fc = ckpt["foundry_config"]
+        foundry = ExpertFoundry(
+            gate,
+            experts,
+            expert_input_dim=fc["expert_input_dim"],
+            expert_output_dim=fc["expert_output_dim"],
+            timeout_s=fc["timeout_s"],
+            smoke_batch=fc["smoke_batch"],
+        )
+
+        # -- 5. optimizer: rebuild save-time group structure, verify, load ------
+        if optimizer_factory is None:
+            optimizer_factory = torch.optim.Adam
+        base_params = list(gate.parameters()) + [
+            p for e in experts[:n_base] for p in e.parameters()
+        ]
+        optimizer = optimizer_factory(base_params)
+        # Mirror the foundry's registration behavior exactly: one fresh group
+        # per generated expert, skipped when the expert has no parameters.
+        parameterized_gen = []
+        for e in experts[n_base:]:
+            ps = list(e.parameters())
+            if ps:
+                optimizer.add_param_group({"params": ps})
+                parameterized_gen.append(len(ps))
+
+        # Silent-corruption guard (see docstring): verify group structure
+        # against the LIVE rebuilt objects and against the checkpoint, param
+        # counts included, before the positional load.
+        expected_counts = [len(base_params)] + parameterized_gen
+        live_counts = [len(g["params"]) for g in optimizer.param_groups]
+        ckpt_counts = [
+            len(g["params"]) for g in ckpt["optimizer_state"]["param_groups"]
+        ]
+        if live_counts != expected_counts:
+            raise ValueError(
+                f"optimizer group structure mismatch: rebuilt optimizer has "
+                f"per-group param counts {live_counts}, but the reconstructed "
+                f"gate/experts imply {expected_counts} (1 base group + one per "
+                f"parameterized generated expert). Did optimizer_factory split "
+                f"params into multiple groups?"
+            )
+        if len(live_counts) != len(ckpt_counts):
+            raise ValueError(
+                f"optimizer group count mismatch vs checkpoint: rebuilt "
+                f"{len(live_counts)} groups {live_counts}, checkpoint stores "
+                f"{len(ckpt_counts)} groups {ckpt_counts}. load_state_dict "
+                f"matches by position; refusing to load mismatched structure."
+            )
+        for i, (lc, cc) in enumerate(zip(live_counts, ckpt_counts)):
+            if lc != cc:
+                raise ValueError(
+                    f"optimizer param count mismatch in group {i}: rebuilt "
+                    f"group has {lc} params, checkpoint group has {cc}. "
+                    f"load_state_dict matches by position; refusing to load "
+                    f"positionally-mismatched momentum state."
+                )
+        optimizer.load_state_dict(ckpt["optimizer_state"])
+
+        # -- 6. detector + orchestrator + counters ------------------------------
+        if detector is None:
+            ds = ckpt.get("detector_state")
+            detector = (
+                RollingSpikeDetector.from_state(ds) if ds else RollingSpikeDetector()
+            )
+
+        orch = cls(
+            gate,
+            experts,
+            foundry,
+            optimizer,
+            log_path=log_path,
+            expert_source_generator=expert_source_generator,
+            detector=detector,
+            task_loss_fn=task_loss_fn,
+            max_experts=ckpt["orch_config"]["max_experts"],
+            spike_cooldown_steps=ckpt["orch_config"]["spike_cooldown_steps"],
+            checkpoint_path=checkpoint_path if checkpoint_path else path,
+            checkpoint_every_n_steps=checkpoint_every_n_steps,
+        )
+        orch.step_count = ckpt["step_count"]
+        counters = ckpt["counters"]
+        orch.spikes_seen = counters["spikes_seen"]
+        orch.registrations = counters["registrations"]
+        orch.rejections = counters["rejections"]
+        orch._last_registration_step = counters["last_registration_step"]
+        # The constructor recorded len(experts) as the base count; correct it
+        # to the checkpointed split so future checkpoints stay reconstructible.
+        orch._n_base_experts = n_base
+        orch._registered_sources = [dict(e) for e in generated]
+
+        orch.logger.log(
+            "resumed_from_checkpoint",
+            path=str(path),
+            step_count=orch.step_count,
+            num_experts=gate.num_experts,
+            registrations=orch.registrations,
+        )
+        return orch
+
     # -- convenience loop -----------------------------------------------------
     def run(
         self,
         steps: int,
         data_fn: Callable[[int], tuple[Tensor, Tensor]],
     ) -> list[StepResult]:
-        """Run ``steps`` training steps, pulling batches from ``data_fn(step)``."""
+        """Run ``steps`` training steps, pulling batches from ``data_fn(step)``.
+
+        Checkpointing (when ``checkpoint_path`` is set): every
+        ``checkpoint_every_n_steps`` completed steps, once at the end of the
+        run, and on interruption. All saves happen at loop level -- between
+        ``train_step`` calls -- so a checkpoint never captures a mid-step
+        state. On interruption (quota kill delivered as KeyboardInterrupt, or
+        any error) the in-flight step is abandoned and a checkpoint of the
+        last consistent state is written before the exception re-raises.
+        """
         self.logger.log(
             "run_start",
             steps=steps,
@@ -471,13 +858,43 @@ class TrainingOrchestrator:
             expert_output_dim=self.foundry.expert_output_dim,
             max_experts=self.max_experts,
             spike_cooldown_steps=self.spike_cooldown_steps,
+            checkpoint_every_n_steps=self.checkpoint_every_n_steps,
             detector={
                 "window": getattr(self.detector, "window", None),
                 "z_threshold": getattr(self.detector, "z_threshold", None),
                 "min_history": getattr(self.detector, "min_history", None),
             },
         )
-        results = [self.train_step(*data_fn(self.step_count + 1)) for _ in range(steps)]
+        results: list[StepResult] = []
+        try:
+            for _ in range(steps):
+                x, y = data_fn(self.step_count + 1)
+                results.append(self.train_step(x, y))
+                if (
+                    self.checkpoint_path is not None
+                    and self.checkpoint_every_n_steps
+                    and self.step_count % self.checkpoint_every_n_steps == 0
+                ):
+                    self.save_checkpoint()
+        except BaseException:
+            # Interruption path. We are at loop level (the raising frame has
+            # unwound), so the save below never captures a mid-step state --
+            # it reflects the last completed step; the interrupted one is
+            # abandoned and will be re-run after resume.
+            self.logger.log(
+                "run_interrupted", step=self.step_count, completed_steps=len(results)
+            )
+            if self.checkpoint_path is not None:
+                try:
+                    self.save_checkpoint()
+                except Exception as save_exc:  # never mask the original error
+                    self.logger.log(
+                        "checkpoint_failed", step=self.step_count, reason=repr(save_exc)
+                    )
+            raise
+
+        if self.checkpoint_path is not None:
+            self.save_checkpoint()
         self.logger.log(
             "run_end",
             steps=len(results),
@@ -491,50 +908,91 @@ class TrainingOrchestrator:
 
 # =============================================================================
 # Standalone demo: watch spike -> generate -> register -> continue, locally.
+#
+# The demo's building blocks live at MODULE level (not inside __main__) so
+# that resume_demo.py imports the exact same expert architecture and data
+# distribution instead of redefining them -- any drift between the original
+# run and a resumed run would silently invalidate the resumed weights.
 # =============================================================================
+DEMO_IN_DIM = 16
+DEMO_OUT_DIM = 16
+DEMO_STEPS = 300
+DEMO_OOD_EVERY = 40  # inject an out-of-distribution batch every N steps
+DEMO_LOG = "orchestrator_run.jsonl"
+DEMO_CHECKPOINT = "orchestrator_demo.ckpt"
+DEMO_CHECKPOINT_EVERY = 25
+DEMO_MAX_EXPERTS = 12
+DEMO_COOLDOWN = 20
+
+
+def demo_base_expert_factory() -> nn.Module:
+    """The demo's base-expert architecture -- ALSO used by from_checkpoint."""
+    return nn.Linear(DEMO_IN_DIM, DEMO_OUT_DIM)
+
+
+def make_demo_data_fn() -> Callable[[int], tuple[Tensor, Tensor]]:
+    """Build the demo's synthetic-regression data function.
+
+    ``W_true`` comes from a DEDICATED seeded generator, not the global RNG, so
+    the original run and any resumed run reconstruct the IDENTICAL regression
+    task no matter what the global RNG state is at call time. Step numbering
+    drives the OOD injection, so a resumed run keeps the same spike cadence.
+    """
+    gen = torch.Generator().manual_seed(0)
+    w_true = torch.randn(DEMO_IN_DIM, DEMO_OUT_DIM, generator=gen) * 0.5
+
+    def data_fn(step: int) -> tuple[Tensor, Tensor]:
+        x = torch.randn(32, DEMO_IN_DIM)
+        if step % DEMO_OOD_EVERY == 0:
+            x = x * 8.0  # OOD scale blow-up -> engineered loss spike
+        y = x @ w_true + 0.01 * torch.randn(32, DEMO_OUT_DIM)
+        return x, y
+
+    return data_fn
+
+
+def print_demo_summary(orch: TrainingOrchestrator, results: list[StepResult],
+                       *, start_experts: int, start_counts: tuple[int, int, int]) -> None:
+    """Shared summary printer so demo and resume output are comparable."""
+    s0, r0, j0 = start_counts
+    print("\n=== run summary ===")
+    print(f"steps          : {len(results)}")
+    print(f"spikes seen    : {orch.spikes_seen - s0}")
+    print(f"registrations  : {orch.registrations - r0}")
+    print(f"rejections     : {orch.rejections - j0}")
+    print(f"experts        : {start_experts} -> {orch.gate.num_experts} "
+          f"(len(experts)={len(orch.experts)})")
+    print(f"final task loss: {results[-1].loss:.4f}")
+    print(f"log written to : {orch.logger.path}")
+
+
 if __name__ == "__main__":
     torch.manual_seed(0)
 
-    IN_DIM = 16
-    OUT_DIM = 16
-    N_STEPS = 300
-    OOD_EVERY = 40  # inject an out-of-distribution batch every N steps
-
-    gate = DynamicNoisyTopKGate(IN_DIM, num_experts=4, k=2).train()
-    experts = nn.ModuleList(nn.Linear(IN_DIM, OUT_DIM) for _ in range(4))
-    foundry = ExpertFoundry(gate, experts, expert_input_dim=IN_DIM,
-                            expert_output_dim=OUT_DIM)
+    gate = DynamicNoisyTopKGate(DEMO_IN_DIM, num_experts=4, k=2).train()
+    experts = nn.ModuleList(demo_base_expert_factory() for _ in range(4))
+    foundry = ExpertFoundry(gate, experts, expert_input_dim=DEMO_IN_DIM,
+                            expert_output_dim=DEMO_OUT_DIM)
     optimizer = torch.optim.Adam(
         list(gate.parameters()) + list(experts.parameters()), lr=1e-3
     )
 
-    # Synthetic regression task: y = x @ W_true + noise.
-    W_true = torch.randn(IN_DIM, OUT_DIM) * 0.5
-
-    def data_fn(step: int) -> tuple[Tensor, Tensor]:
-        x = torch.randn(32, IN_DIM)
-        if step % OOD_EVERY == 0:
-            x = x * 8.0  # OOD scale blow-up -> engineered loss spike
-        y = x @ W_true + 0.01 * torch.randn(32, OUT_DIM)
-        return x, y
-
     orch = TrainingOrchestrator(
         gate, experts, foundry, optimizer,
-        log_path="orchestrator_run.jsonl",
+        log_path=DEMO_LOG,
         detector=RollingSpikeDetector(window=30, z_threshold=4.0, min_history=10),
-        spike_cooldown_steps=20,
-        max_experts=12,
+        spike_cooldown_steps=DEMO_COOLDOWN,
+        max_experts=DEMO_MAX_EXPERTS,
+        # Checkpointing on: periodic saves plus a save from run()'s interrupt
+        # handler, so a Ctrl+C at ANY point leaves a resumable checkpoint for
+        # resume_demo.py. (A real-interrupt test previously showed the handler
+        # firing correctly but having nothing configured to save to.)
+        checkpoint_path=DEMO_CHECKPOINT,
+        checkpoint_every_n_steps=DEMO_CHECKPOINT_EVERY,
     )
 
-    print(f"running {N_STEPS} steps (OOD batch every {OOD_EVERY})...")
-    results = orch.run(N_STEPS, data_fn)
-
-    print("\n=== run summary ===")
-    print(f"steps          : {len(results)}")
-    print(f"spikes seen    : {orch.spikes_seen}")
-    print(f"registrations  : {orch.registrations}")
-    print(f"rejections     : {orch.rejections}")
-    print(f"experts        : 4 -> {gate.num_experts} (len(experts)={len(experts)})")
-    print(f"final task loss: {results[-1].loss:.4f}")
-    print(f"log written to : {orch.logger.path}")
+    print(f"running {DEMO_STEPS} steps (OOD batch every {DEMO_OOD_EVERY}, "
+          f"checkpoint every {DEMO_CHECKPOINT_EVERY})...")
+    results = orch.run(DEMO_STEPS, make_demo_data_fn())
+    print_demo_summary(orch, results, start_experts=4, start_counts=(0, 0, 0))
     orch.logger.close()
