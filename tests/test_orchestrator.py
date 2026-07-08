@@ -20,6 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.moe.dynamic_gating import DynamicNoisyTopKGate, ExpertFoundry  # noqa: E402
 from core.orchestrator import (  # noqa: E402
+    GenerationAttempt,
+    MockLLMGenerator,
     RollingSpikeDetector,
     SpikeInfo,
     TrainingOrchestrator,
@@ -58,12 +60,12 @@ def _make_orchestrator(log_path, *, n_start=4, generator=None, detector=None, **
         gate, experts, expert_input_dim=IN_DIM, expert_output_dim=OUT_DIM
     )
     opt = torch.optim.Adam(list(gate.parameters()) + list(experts.parameters()))
+    kwargs.setdefault("spike_cooldown_steps", 0)
     orch = TrainingOrchestrator(
         gate, experts, foundry, opt,
         log_path=log_path,
         expert_source_generator=generator or template_mlp_expert_source,
         detector=detector or StubDetector(fire_on_calls=()),
-        spike_cooldown_steps=0,
         **kwargs,
     )
     return gate, experts, opt, orch
@@ -125,7 +127,7 @@ def test_spike_detector_flags_nonfinite_loss():
 # 2. Loop resilience: bad candidates must never crash training
 # ---------------------------------------------------------------------------
 def test_rejected_candidate_does_not_crash_loop():
-    bad_generator = lambda ctx: f"""
+    bad_generator = lambda ctx, prior_attempt=None: f"""
 class BadDim{ctx.step}(nn.Module):
     def __init__(self):
         super().__init__()
@@ -135,8 +137,11 @@ class BadDim{ctx.step}(nn.Module):
 """
     with tempfile.TemporaryDirectory() as tmp:
         log = os.path.join(tmp, "run.jsonl")
+        # max_generation_attempts=1 pins the original single-shot semantics
+        # this test was written for (exactly one rejection per spike).
         gate, experts, opt, orch = _make_orchestrator(
-            log, generator=bad_generator, detector=StubDetector(fire_on_calls=(2,))
+            log, generator=bad_generator, detector=StubDetector(fire_on_calls=(2,)),
+            max_generation_attempts=1,
         )
         try:
             results = orch.run(4, _data_fn)  # must complete despite rejection
@@ -154,13 +159,16 @@ class BadDim{ctx.step}(nn.Module):
 
 
 def test_generator_exception_does_not_crash_loop():
-    def crashing_generator(ctx):
+    def crashing_generator(ctx, prior_attempt=None):
         raise RuntimeError("LLM endpoint on fire")
 
     with tempfile.TemporaryDirectory() as tmp:
         log = os.path.join(tmp, "run.jsonl")
+        # Spikes at 2 AND 3 with cooldown 5: the crash-abort at step 2 must arm
+        # the cooldown (a crashing generator is throttled like a failing one).
         gate, experts, opt, orch = _make_orchestrator(
-            log, generator=crashing_generator, detector=StubDetector(fire_on_calls=(2,))
+            log, generator=crashing_generator,
+            detector=StubDetector(fire_on_calls=(2, 3)), spike_cooldown_steps=5,
         )
         try:
             results = orch.run(4, _data_fn)
@@ -170,9 +178,207 @@ def test_generator_exception_does_not_crash_loop():
         assert gate.num_experts == len(experts) == 4
         events = _read_events(log)
         rejected = [e for e in events if e["event"] == "registration_rejected"]
-        assert len(rejected) == 1
+        assert len(rejected) == 1  # crash ABORTS the sequence: no retries
         assert rejected[0]["stage"] == "generation"
         assert "on fire" in rejected[0]["reason"]
+        skipped = [e for e in events if e["event"] == "registration_skipped"]
+        assert len(skipped) == 1 and skipped[0]["reason"] == "cooldown"
+
+
+# ---------------------------------------------------------------------------
+# 2b. Self-correcting retry loop
+# ---------------------------------------------------------------------------
+def test_retry_succeeds_on_second_attempt():
+    # Mock LLM deterministically emits broken source on attempt 1 and corrects
+    # itself on attempt 2 using the foundry's rejection reason.
+    gen = MockLLMGenerator(failure_rate=1.0, force_mode="wrong_dim")
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "run.jsonl")
+        ck = os.path.join(tmp, "ck.pt")
+        gate, experts, opt, orch = _make_orchestrator(
+            log, generator=gen, detector=StubDetector(fire_on_calls=(2,))
+        )
+        try:
+            orch.run(3, _data_fn)
+            orch.save_checkpoint(ck)
+        finally:
+            orch.logger.close()
+
+        assert gate.num_experts == len(experts) == 5
+        events = _read_events(log)
+        cand = [e for e in events if e["event"] == "candidate_generated"]
+        assert [e["attempt"] for e in cand] == [1, 2], "exactly two attempts"
+        succ = [e for e in events if e["event"] == "registration_success"]
+        assert len(succ) == 1 and succ[0]["attempt"] == 2
+        assert not any(e["event"] == "registration_exhausted" for e in events)
+
+        # The checkpoint carries ONLY the successful (second) source -- never
+        # the rejected first attempt.
+        import hashlib
+        ckpt = torch.load(ck, weights_only=True)
+        assert len(ckpt["generated_experts"]) == 1
+        stored_sha = hashlib.sha256(
+            ckpt["generated_experts"][0]["source"].encode("utf-8")
+        ).hexdigest()
+        assert stored_sha == cand[1]["source_sha256"]
+        assert stored_sha != cand[0]["source_sha256"]
+
+
+def test_retry_exhaustion_never_crashes():
+    # Failures DIFFER per attempt (escalating wrong dim), so the last_reason
+    # assertion below is not vacuous: if the code stored the FIRST rejection
+    # reason instead of the last, the test would fail. (An always-identical
+    # failure -- e.g. MockLLMGenerator(always_fail=True) -- could not tell
+    # first from last.)
+    def escalating_bad_generator(ctx, prior_attempt=None):
+        n = 1 if prior_attempt is None else prior_attempt.attempt_number + 1
+        return f"""
+class BadDimAttempt{n}(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lin = nn.Linear({ctx.input_dim}, {ctx.output_dim + n})
+    def forward(self, x):
+        return self.lin(x)
+"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "run.jsonl")
+        ck = os.path.join(tmp, "ck.pt")
+        # Spikes at steps 2 AND 3; cooldown 5 -> the exhaustion at step 2 must
+        # throttle the step-3 spike (exhaustion arms the cooldown like success).
+        gate, experts, opt, orch = _make_orchestrator(
+            log, generator=escalating_bad_generator,
+            detector=StubDetector(fire_on_calls=(2, 3)),
+            max_generation_attempts=3, spike_cooldown_steps=5,
+        )
+        try:
+            results = orch.run(4, _data_fn)  # must complete despite exhaustion
+            orch.save_checkpoint(ck)
+        finally:
+            orch.logger.close()
+
+        assert len(results) == 4
+        assert gate.num_experts == len(experts) == 4  # nothing registered
+        events = _read_events(log)
+        cand = [e for e in events if e["event"] == "candidate_generated"]
+        assert [e["attempt"] for e in cand] == [1, 2, 3]
+        rejected = [e for e in events if e["event"] == "registration_rejected"]
+        assert len(rejected) == 3
+        # Three genuinely different reasons (out dims +1, +2, +3)...
+        assert len({e["reason"] for e in rejected}) == 3
+        exhausted = [e for e in events if e["event"] == "registration_exhausted"]
+        assert len(exhausted) == 1
+        assert exhausted[0]["attempts"] == 3
+        # ...and last_reason is specifically the THIRD attempt's failure
+        # (the foundry smoke-tests with its smoke_batch of 4, so the offending
+        # shape it reports is (4, OUT_DIM + 3)).
+        assert exhausted[0]["last_reason"] == rejected[2]["reason"]
+        assert f"(4, {OUT_DIM + 3})" in exhausted[0]["last_reason"]
+        # The step-3 spike hit the cooldown armed by the exhaustion.
+        skipped = [e for e in events if e["event"] == "registration_skipped"]
+        assert len(skipped) == 1 and skipped[0]["reason"] == "cooldown"
+
+        # Checkpoint after exhaustion carries no phantom expert and resumes.
+        orch2 = TrainingOrchestrator.from_checkpoint(
+            ck, base_expert_factory=_base_expert_factory,
+            log_path=os.path.join(tmp, "run2.jsonl"),
+        )
+        try:
+            assert orch2.gate.num_experts == len(orch2.experts) == 4
+            assert orch2._registered_sources == []
+        finally:
+            orch2.logger.close()
+
+    # Smoke the mock's always_fail knob through the same exhaustion path.
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "run.jsonl")
+        gate, experts, opt, orch = _make_orchestrator(
+            log, generator=MockLLMGenerator(always_fail=True),
+            detector=StubDetector(fire_on_calls=(2,)), max_generation_attempts=3,
+        )
+        try:
+            orch.run(3, _data_fn)
+        finally:
+            orch.logger.close()
+        assert gate.num_experts == len(experts) == 4
+        events = _read_events(log)
+        assert sum(e["event"] == "registration_exhausted" for e in events) == 1
+
+
+def test_prior_attempt_carries_real_rejection_reason():
+    calls = []       # the prior_attempt received on each call
+    returned = []    # the source returned by each call
+
+    def recording_generator(ctx, prior_attempt=None):
+        calls.append(prior_attempt)
+        if prior_attempt is None:
+            src = f"""
+class WrongDim{ctx.step}(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lin = nn.Linear({ctx.input_dim}, {ctx.output_dim + 2})
+    def forward(self, x):
+        return self.lin(x)
+"""
+        else:
+            src = template_mlp_expert_source(ctx, prior_attempt)
+        returned.append(src)
+        return src
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "run.jsonl")
+        gate, experts, opt, orch = _make_orchestrator(
+            log, generator=recording_generator, detector=StubDetector(fire_on_calls=(2,))
+        )
+        try:
+            orch.run(3, _data_fn)
+        finally:
+            orch.logger.close()
+
+        assert gate.num_experts == 5  # retry succeeded
+        assert len(calls) == 2
+        assert calls[0] is None, "first attempt must receive prior_attempt=None"
+        ga = calls[1]
+        assert isinstance(ga, GenerationAttempt)
+        assert ga.attempt_number == 1
+        # The prior attempt carries the EXACT source that failed...
+        assert ga.source == returned[0]
+        # ...and the REAL rejection reason the foundry produced for it -- the
+        # same string that was logged, mentioning the actual shape mismatch.
+        events = _read_events(log)
+        rejected = [e for e in events if e["event"] == "registration_rejected"]
+        assert len(rejected) == 1
+        assert ga.rejection_reason == rejected[0]["reason"]
+        assert "output shape" in ga.rejection_reason
+
+
+def test_mock_llm_corrects_each_failure_mode():
+    # Every simulated LLM failure mode must be corrected on attempt 2, with
+    # the correction branch chosen from the rejection reason (visible in the
+    # generated class name).
+    for mode, label in (
+        ("syntax", "FixedSyntax"),
+        ("wrong_dim", "FixedDim"),
+        ("forbidden_import", "FixedImport"),
+    ):
+        gen = MockLLMGenerator(failure_rate=1.0, force_mode=mode)
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "run.jsonl")
+            gate, experts, opt, orch = _make_orchestrator(
+                log, generator=gen, detector=StubDetector(fire_on_calls=(1,))
+            )
+            try:
+                orch.run(2, _data_fn)
+            finally:
+                orch.logger.close()
+            assert gate.num_experts == len(experts) == 5, f"mode {mode} failed"
+            events = _read_events(log)
+            succ = [e for e in events if e["event"] == "registration_success"]
+            assert len(succ) == 1 and succ[0]["attempt"] == 2, f"mode {mode}"
+            assert label in succ[0]["class_name"], (
+                f"mode {mode}: correction branch not driven by rejection "
+                f"reason (got {succ[0]['class_name']})"
+            )
 
 
 # ---------------------------------------------------------------------------

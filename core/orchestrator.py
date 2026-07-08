@@ -59,6 +59,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,7 +80,9 @@ __all__ = [
     "SpikeInfo",
     "RollingSpikeDetector",
     "FailureContext",
+    "GenerationAttempt",
     "template_mlp_expert_source",
+    "MockLLMGenerator",
     "JsonlLogger",
     "StepResult",
     "TrainingOrchestrator",
@@ -208,17 +211,42 @@ class FailureContext:
     batch: Tensor  # detached clone of the input batch that triggered the spike
 
 
-def template_mlp_expert_source(ctx: FailureContext) -> str:
+@dataclass(frozen=True)
+class GenerationAttempt:
+    """Record of one failed generation attempt, fed back to the generator.
+
+    Carries the exact source string that was tried and the exact
+    ``ExpertValidationError`` message it triggered, so a self-correcting
+    generator can fix its own mistake instead of blindly re-rolling.
+    """
+
+    attempt_number: int
+    source: str
+    rejection_reason: str
+
+
+def template_mlp_expert_source(
+    ctx: FailureContext, prior_attempt: Optional[GenerationAttempt] = None
+) -> str:
     """Placeholder expert-source generator (future LLM call goes here).
 
     Emits a 2-layer GELU MLP sized to the failure context's dims. Obeys the
     foundry sandbox contract: no imports, zero-arg constructor, only the
     pre-injected ``nn`` / ``F`` names. The class name embeds the triggering
     step so registrations are traceable in logs and audit records.
+
+    Retry contract demonstration: when ``prior_attempt`` is given, every
+    dimension below is re-derived from ``ctx`` alone -- NOTHING is recovered
+    or parsed from the failed attempt's source. The failed source exists only
+    for diagnosis (its rejection_reason); the failure context is the single
+    source of truth for what a correct expert must look like. A fixed-shape
+    template rarely needs correcting, but any real generator must follow the
+    same rule: correct FROM the contract, not from the broken artifact.
     """
     hidden = max(4, 2 * ctx.input_dim)
+    suffix = f"Retry{prior_attempt.attempt_number}" if prior_attempt is not None else ""
     return f"""
-class GeneratedExpertStep{ctx.step}(nn.Module):
+class GeneratedExpertStep{ctx.step}{suffix}(nn.Module):
     def __init__(self):
         super().__init__()
         self.fc1 = nn.Linear({ctx.input_dim}, {hidden})
@@ -226,6 +254,120 @@ class GeneratedExpertStep{ctx.step}(nn.Module):
 
     def forward(self, x):
         return self.fc2(F.gelu(self.fc1(x)))
+"""
+
+
+class MockLLMGenerator:
+    """Deterministic stand-in for a future Fireworks-backed LLM generator.
+
+    Simulates an LLM's REAL failure modes rather than always succeeding: on a
+    first attempt it can emit syntactically broken source, source with the
+    wrong output dimension, or source containing a forbidden import. On retry
+    it "reads" ``prior_attempt.rejection_reason`` and emits corrected source
+    (derived entirely from the failure context's dims) that passes validation.
+    The correction branch taken is encoded in the generated class name
+    (``FixedSyntax`` / ``FixedDim`` / ``FixedImport``) so tests and logs can
+    verify the rejection reason genuinely drove the correction.
+
+    .. warning:: FRAGILITY -- do not copy this error-handling pattern into a
+        real generator. The retry logic below string-matches substrings of the
+        foundry's human-readable ``ExpertValidationError`` prose ("syntax
+        error", "output shape", "imports are not allowed"). That text is NOT a
+        stable interface -- it can be reworded at any time without notice.
+        This is acceptable for a mock/test tool only. A real Fireworks-backed
+        generator should consume structured error information (e.g. an
+        error-code field added to ``ExpertValidationError``), or simply pass
+        the raw reason string to the LLM as correction context -- never
+        branch programmatically on exact exception wording.
+
+    Args:
+        failure_rate: Probability that a FIRST attempt emits broken source.
+        seed: Seed for the internal ``random.Random`` (deterministic tests).
+        always_fail: Every attempt (first and retries) emits broken source;
+            for exercising retry exhaustion.
+        force_mode: Pin the first-attempt failure mode instead of sampling:
+            one of ``"syntax"``, ``"wrong_dim"``, ``"forbidden_import"``.
+    """
+
+    FAILURE_MODES = ("syntax", "wrong_dim", "forbidden_import")
+
+    def __init__(
+        self,
+        *,
+        failure_rate: float = 1.0,
+        seed: int = 0,
+        always_fail: bool = False,
+        force_mode: Optional[str] = None,
+    ) -> None:
+        if force_mode is not None and force_mode not in self.FAILURE_MODES:
+            raise ValueError(
+                f"force_mode must be one of {self.FAILURE_MODES}, got {force_mode!r}"
+            )
+        self._rng = random.Random(seed)
+        self.failure_rate = failure_rate
+        self.always_fail = always_fail
+        self.force_mode = force_mode
+
+    def __call__(
+        self, ctx: FailureContext, prior_attempt: Optional[GenerationAttempt] = None
+    ) -> str:
+        if self.always_fail:
+            return self._broken_source("wrong_dim", ctx)
+        if prior_attempt is None:
+            if self._rng.random() < self.failure_rate:
+                mode = self.force_mode or self._rng.choice(self.FAILURE_MODES)
+                return self._broken_source(mode, ctx)
+            return self._good_source(ctx, "FirstTry")
+        # Retry: pick the correction branch from the rejection reason.
+        # (String-matching on exception prose -- MOCK-ONLY, see class docstring.)
+        reason = prior_attempt.rejection_reason.lower()
+        if "syntax error" in reason:
+            label = "FixedSyntax"
+        elif "output shape" in reason:
+            label = "FixedDim"
+        elif "imports are not allowed" in reason or "forbidden pattern" in reason:
+            label = "FixedImport"
+        else:
+            label = "FixedOther"
+        return self._good_source(ctx, label)
+
+    def _good_source(self, ctx: FailureContext, label: str) -> str:
+        # Correct-by-reconstruction: dims come from the failure context ONLY,
+        # never from anything in a failed attempt's source.
+        hidden = max(4, 2 * ctx.input_dim)
+        return f"""
+class MockExpertStep{ctx.step}{label}(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear({ctx.input_dim}, {hidden})
+        self.fc2 = nn.Linear({hidden}, {ctx.output_dim})
+
+    def forward(self, x):
+        return self.fc2(F.gelu(self.fc1(x)))
+"""
+
+    def _broken_source(self, mode: str, ctx: FailureContext) -> str:
+        if mode == "syntax":
+            # Unterminated def -> foundry's "syntax error in source: ..."
+            return "class Broken(nn.Module):\n    def __init__(self"
+        if mode == "wrong_dim":
+            # Off-by-one output dim -> "forward() output shape ... != expected"
+            return f"""
+class MockExpertStep{ctx.step}WrongDim(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lin = nn.Linear({ctx.input_dim}, {ctx.output_dim + 1})
+
+    def forward(self, x):
+        return self.lin(x)
+"""
+        # forbidden_import -> "imports are not allowed in generated expert source"
+        return f"""
+import os
+
+class MockExpertStep{ctx.step}Evil(nn.Module):
+    def forward(self, x):
+        return x
 """
 
 
@@ -326,11 +468,14 @@ class TrainingOrchestrator:
     One ``train_step`` = gate forward -> dense top-k expert combine -> task
     loss + aux loss -> backward -> optimizer step, all under
     ``gate.expand_lock``; then (lock released) spike detection and, on a
-    spike, candidate generation + transactional foundry registration.
+    spike, candidate generation + transactional foundry registration with up
+    to ``max_generation_attempts`` self-correcting retries (each retry gets a
+    :class:`GenerationAttempt` carrying the prior source + rejection reason).
 
-    A rejected candidate (``ExpertValidationError``) or a crashing generator
-    is logged and training continues -- a bad candidate must never kill the
-    loop. The foundry's rollback guarantees state is unchanged on rejection.
+    A rejected candidate (``ExpertValidationError``), a crashing generator,
+    or a fully exhausted retry sequence is logged and training continues --
+    a bad candidate must never kill the loop. The foundry's rollback
+    guarantees state is unchanged on every rejection.
     """
 
     def __init__(
@@ -341,14 +486,21 @@ class TrainingOrchestrator:
         optimizer: torch.optim.Optimizer,
         *,
         log_path: Union[str, Path],
-        expert_source_generator: Callable[[FailureContext], str] = template_mlp_expert_source,
+        expert_source_generator: Callable[
+            [FailureContext, Optional[GenerationAttempt]], str
+        ] = template_mlp_expert_source,
         detector: Optional[RollingSpikeDetector] = None,
         task_loss_fn: Callable[[Tensor, Tensor], Tensor] = F.mse_loss,
         max_experts: Optional[int] = None,
         spike_cooldown_steps: int = 10,
+        max_generation_attempts: int = 3,
         checkpoint_path: Optional[Union[str, Path]] = None,
         checkpoint_every_n_steps: Optional[int] = None,
     ) -> None:
+        if max_generation_attempts < 1:
+            raise ValueError(
+                f"max_generation_attempts must be >= 1, got {max_generation_attempts}"
+            )
         self.gate = gate
         self.experts = experts
         self.foundry = foundry
@@ -358,12 +510,20 @@ class TrainingOrchestrator:
         self.task_loss_fn = task_loss_fn
         self.max_experts = max_experts
         self.spike_cooldown_steps = spike_cooldown_steps
+        self.max_generation_attempts = max_generation_attempts
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
         self.checkpoint_every_n_steps = checkpoint_every_n_steps
         self.logger = JsonlLogger(log_path)
 
         self.step_count = 0
-        self._last_registration_step: Optional[int] = None
+        # Cooldown marker: the last step at which a generation SEQUENCE ran to
+        # completion -- set on registration success AND on retry exhaustion.
+        # Exhaustion must arm the cooldown too: under a persistent spike
+        # condition (broken generator + sustained OOD data), every subsequent
+        # spiking step would otherwise fire a full max_generation_attempts
+        # retry sequence with zero throttling. Repeatedly-failing spikes are
+        # throttled exactly like repeatedly-succeeding ones.
+        self._last_generation_step: Optional[int] = None
         # Run counters, surfaced in run_end and the __main__ summary.
         self.spikes_seen = 0
         self.registrations = 0
@@ -457,9 +617,17 @@ class TrainingOrchestrator:
             registered=registered,
         )
 
-    # -- spike -> candidate -> registration ---------------------------------
+    # -- spike -> candidate -> registration (with self-correcting retries) ---
     def _handle_spike(self, step: int, spike: SpikeInfo, x: Tensor) -> bool:
-        """Generate + register a candidate expert. Returns True on success."""
+        """Generate + register a candidate expert, retrying with feedback.
+
+        The generator gets up to ``max_generation_attempts`` tries; each retry
+        receives a :class:`GenerationAttempt` carrying the previous source and
+        the exact foundry rejection reason, so it can correct its own mistake.
+        Returns True on the first successful registration; False if the spike
+        was skipped (cap/cooldown), the generator crashed, or all attempts
+        were rejected -- none of which may ever crash the training loop.
+        """
         # Cap and cooldown gates first -- both are logged so the demo log can
         # explain why a spike produced no expert.
         if self.max_experts is not None and self.gate.num_experts >= self.max_experts:
@@ -469,16 +637,18 @@ class TrainingOrchestrator:
             )
             return False
         if (
-            self._last_registration_step is not None
-            and step - self._last_registration_step < self.spike_cooldown_steps
+            self._last_generation_step is not None
+            and step - self._last_generation_step < self.spike_cooldown_steps
         ):
             self.logger.log(
                 "registration_skipped", step=step, reason="cooldown",
-                last_registration_step=self._last_registration_step,
+                last_generation_step=self._last_generation_step,
                 cooldown_steps=self.spike_cooldown_steps,
             )
             return False
 
+        # Built ONCE for the whole retry sequence: nothing registers between
+        # attempts, so the context (expert count included) stays accurate.
         ctx = FailureContext(
             step=step,
             loss=spike.loss,
@@ -491,60 +661,100 @@ class TrainingOrchestrator:
             batch=x.detach().clone(),
         )
 
-        # A crashing generator must not kill the training loop either.
-        try:
-            source = self.generator(ctx)
-        except Exception as exc:  # noqa: BLE001 - deliberate loop shield
-            self.rejections += 1
+        prior: Optional[GenerationAttempt] = None
+        last_reason = ""
+        for attempt in range(1, self.max_generation_attempts + 1):
+            # A crashing generator must not kill the training loop. It also
+            # aborts the retry sequence: with no source produced, there is
+            # nothing to build correction feedback from.
+            try:
+                source = self.generator(ctx, prior)
+            except Exception as exc:  # noqa: BLE001 - deliberate loop shield
+                self.rejections += 1
+                # A crash-abort arms the cooldown just like exhaustion does: a
+                # generator broken enough to raise (vs. merely emit bad source)
+                # must not get a fresh sequence on every subsequent spike.
+                self._last_generation_step = step
+                self.logger.log(
+                    "registration_rejected", step=step, stage="generation",
+                    attempt=attempt, reason=repr(exc),
+                    num_experts=self.gate.num_experts,
+                )
+                return False
+
             self.logger.log(
-                "registration_rejected", step=step, stage="generation",
-                reason=repr(exc), num_experts=self.gate.num_experts,
+                "candidate_generated",
+                step=step,
+                attempt=attempt,
+                source_sha256=hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                source_chars=len(source),
             )
-            return False
 
-        self.logger.log(
-            "candidate_generated",
-            step=step,
-            source_sha256=hashlib.sha256(source.encode("utf-8")).hexdigest(),
-            source_chars=len(source),
-        )
+            old_count = self.gate.num_experts
+            try:
+                reg = self.foundry.register_expert_from_source(
+                    source, optimizer=self.optimizer
+                )
+            except ExpertValidationError as exc:
+                # Foundry rollback guarantees gate/experts/optimizer unchanged.
+                self.rejections += 1
+                last_reason = str(exc)
+                self.logger.log(
+                    "registration_rejected", step=step, stage="validation",
+                    attempt=attempt, reason=last_reason,
+                    num_experts=self.gate.num_experts,
+                )
+                # Feed the REAL rejection back for a self-corrected retry.
+                prior = GenerationAttempt(
+                    attempt_number=attempt,
+                    source=source,
+                    rejection_reason=last_reason,
+                )
+                continue
 
-        old_count = self.gate.num_experts
-        try:
-            reg = self.foundry.register_expert_from_source(
-                source, optimizer=self.optimizer
+            # --- success: the ONLY path that records a source. A rejected
+            # attempt can never end up in _registered_sources, so a checkpoint
+            # can never carry a failed candidate as if it were a live expert.
+            # The append is the FIRST statement after the foundry commits, to
+            # minimise the (uncloseable-in-pure-Python) interrupt window in
+            # which the gate has grown but the source is not yet recorded --
+            # a checkpoint saved from that window fails from_checkpoint's
+            # count guard LOUDLY rather than resuming silently wrong.
+            self._registered_sources.append(
+                {"class_name": reg.class_name, "source": source}
             )
-        except ExpertValidationError as exc:
-            # Foundry rollback guarantees gate/experts/optimizer are unchanged.
-            self.rejections += 1
+            self.registrations += 1
+            self._last_generation_step = step
             self.logger.log(
-                "registration_rejected", step=step, stage="validation",
-                reason=str(exc), num_experts=self.gate.num_experts,
+                "registration_success",
+                step=step,
+                attempt=attempt,
+                index=reg.index,
+                class_name=reg.class_name,
+                source_sha256=reg.source_sha256,
+                build_seconds=reg.build_seconds,
             )
-            return False
+            self.logger.log(
+                "expert_count_change",
+                step=step,
+                old=old_count,
+                new=self.gate.num_experts,
+            )
+            return True
 
-        self.registrations += 1
-        self._last_registration_step = step
-        # Retain the source: it is the only way from_checkpoint can rebuild
-        # this expert's architecture before loading its weights.
-        self._registered_sources.append(
-            {"class_name": reg.class_name, "source": source}
-        )
+        # All attempts rejected: the spike goes unhandled and training simply
+        # continues. Exhaustion arms the cooldown exactly like a success does
+        # (see __init__): a persistently-failing generator must not burn a
+        # full retry sequence on every subsequent spiking step.
+        self._last_generation_step = step
         self.logger.log(
-            "registration_success",
+            "registration_exhausted",
             step=step,
-            index=reg.index,
-            class_name=reg.class_name,
-            source_sha256=reg.source_sha256,
-            build_seconds=reg.build_seconds,
+            attempts=self.max_generation_attempts,
+            last_reason=last_reason,
+            num_experts=self.gate.num_experts,
         )
-        self.logger.log(
-            "expert_count_change",
-            step=step,
-            old=old_count,
-            new=self.gate.num_experts,
-        )
-        return True
+        return False
 
     # -- checkpoint / resume ----------------------------------------------------
     def save_checkpoint(self, path: Optional[Union[str, Path]] = None) -> Path:
@@ -594,11 +804,14 @@ class TrainingOrchestrator:
                     "spikes_seen": self.spikes_seen,
                     "registrations": self.registrations,
                     "rejections": self.rejections,
-                    "last_registration_step": self._last_registration_step,
+                    # Key name kept for checkpoint-format stability; it maps
+                    # to _last_generation_step (set on success AND exhaustion).
+                    "last_registration_step": self._last_generation_step,
                 },
                 "orch_config": {
                     "max_experts": self.max_experts,
                     "spike_cooldown_steps": self.spike_cooldown_steps,
+                    "max_generation_attempts": self.max_generation_attempts,
                 },
                 "foundry_config": {
                     "expert_input_dim": self.foundry.expert_input_dim,
@@ -622,7 +835,9 @@ class TrainingOrchestrator:
         *,
         base_expert_factory: Callable[[], nn.Module],
         log_path: Union[str, Path],
-        expert_source_generator: Callable[[FailureContext], str] = template_mlp_expert_source,
+        expert_source_generator: Callable[
+            [FailureContext, Optional[GenerationAttempt]], str
+        ] = template_mlp_expert_source,
         optimizer_factory: Optional[Callable[[list], torch.optim.Optimizer]] = None,
         detector: Optional[Any] = None,
         task_loss_fn: Callable[[Tensor, Tensor], Tensor] = F.mse_loss,
@@ -810,6 +1025,10 @@ class TrainingOrchestrator:
             task_loss_fn=task_loss_fn,
             max_experts=ckpt["orch_config"]["max_experts"],
             spike_cooldown_steps=ckpt["orch_config"]["spike_cooldown_steps"],
+            # .get(): checkpoints written before the retry feature keep loading.
+            max_generation_attempts=ckpt["orch_config"].get(
+                "max_generation_attempts", 3
+            ),
             checkpoint_path=checkpoint_path if checkpoint_path else path,
             checkpoint_every_n_steps=checkpoint_every_n_steps,
         )
@@ -818,7 +1037,7 @@ class TrainingOrchestrator:
         orch.spikes_seen = counters["spikes_seen"]
         orch.registrations = counters["registrations"]
         orch.rejections = counters["rejections"]
-        orch._last_registration_step = counters["last_registration_step"]
+        orch._last_generation_step = counters["last_registration_step"]
         # The constructor recorded len(experts) as the base count; correct it
         # to the checkpointed split so future checkpoints stay reconstructible.
         orch._n_base_experts = n_base
@@ -858,6 +1077,7 @@ class TrainingOrchestrator:
             expert_output_dim=self.foundry.expert_output_dim,
             max_experts=self.max_experts,
             spike_cooldown_steps=self.spike_cooldown_steps,
+            max_generation_attempts=self.max_generation_attempts,
             checkpoint_every_n_steps=self.checkpoint_every_n_steps,
             detector={
                 "window": getattr(self.detector, "window", None),
