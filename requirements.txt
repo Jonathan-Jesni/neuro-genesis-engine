@@ -5,3 +5,11 @@ torch>=2.2
 
 # Test-only:
 pytest>=7.0
+
+# OPTIONAL -- only for GemmaExpertGenerator (the real LLM expert generator).
+# Core, tests, and the container run WITHOUT these; the demo falls back to the
+# dependency-free template generator when they are absent. gemma-2 is a gated
+# model: an HF_TOKEN must be present in the environment or a .env file.
+# transformers>=4.56   # gemma-2 support + the `dtype=` from_pretrained kwarg
+# accelerate           # device_map= loading
+# python-dotenv        # HF_TOKEN from .env

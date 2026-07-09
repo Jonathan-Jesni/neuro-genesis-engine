@@ -60,6 +60,8 @@ import json
 import math
 import os
 import random
+import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,6 +85,9 @@ __all__ = [
     "GenerationAttempt",
     "template_mlp_expert_source",
     "MockLLMGenerator",
+    "GemmaExpertGenerator",
+    "build_gemma_prompt",
+    "extract_python_code",
     "JsonlLogger",
     "StepResult",
     "TrainingOrchestrator",
@@ -369,6 +374,237 @@ class MockExpertStep{ctx.step}Evil(nn.Module):
     def forward(self, x):
         return x
 """
+
+
+# =============================================================================
+# Gemma-backed generator (real LLM behind the same generator contract)
+# =============================================================================
+def build_gemma_prompt(
+    ctx: FailureContext, prior_attempt: Optional[GenerationAttempt] = None
+) -> str:
+    """Build the instruction prompt for Gemma from a failure context.
+
+    Module-level (not a method) so it is testable without loading the model.
+    The prompt states the foundry's full validation contract explicitly --
+    everything the code will be rejected for if violated. The retry variant
+    embeds the complete previous source and the EXACT rejection reason and
+    asks for a fix of that specific issue: this is the real self-correction
+    the retry loop's ``GenerationAttempt`` feedback was built to carry.
+    """
+    contract = (
+        f"Write a single PyTorch neural-network module: a plain feed-forward "
+        f"block that maps one tensor to another. This is NOT a routing or "
+        f"mixture-of-experts layer -- do not build sub-experts or gating.\n"
+        f"\n"
+        f"Hard requirements (code violating ANY of these is rejected):\n"
+        f"1. Define EXACTLY ONE class, an nn.Module subclass. No helper "
+        f"classes, no nn.ModuleList of sub-modules -- one self-contained block.\n"
+        f"2. Zero-argument constructor: __init__(self) only. EVERY attribute "
+        f"you reference in forward MUST be assigned in __init__ (do not use "
+        f"self.<name> unless you set self.<name> = ... in __init__).\n"
+        f"3. forward(self, x) takes a tensor of shape [batch, {ctx.input_dim}] "
+        f"and returns a SINGLE tensor of shape [batch, {ctx.output_dim}]. "
+        f"Never return a list, tuple, or dict.\n"
+        f"4. NO import statements of any kind. The names torch, nn, F "
+        f"(torch.nn.functional), math, and Tensor are already available.\n"
+        f"5. Keep it small (2-3 linear layers) and numerically safe: the "
+        f"output must never contain NaN or Inf.\n"
+        f"\n"
+        f"Context: this expert is being added because the training loss "
+        f"spiked to {ctx.loss:.4f} against a rolling mean of "
+        f"{ctx.rolling_mean:.4f} (z-score {ctx.z_score:.1f}), likely from "
+        f"out-of-distribution inputs. The network already has "
+        f"{ctx.num_experts} experts. Favor a design robust to large-magnitude "
+        f"inputs (e.g. LayerNorm before the first linear layer).\n"
+        f"\n"
+        f"Here is a correct example for different dimensions -- match this "
+        f"STYLE (self-contained, returns one tensor), but use the dimensions "
+        f"required above:\n"
+        f"```python\n"
+        f"class Expert(nn.Module):\n"
+        f"    def __init__(self):\n"
+        f"        super().__init__()\n"
+        f"        self.net = nn.Sequential(\n"
+        f"            nn.LayerNorm(8),\n"
+        f"            nn.Linear(8, 32),\n"
+        f"            nn.GELU(),\n"
+        f"            nn.Linear(32, 10),\n"
+        f"        )\n"
+        f"    def forward(self, x):\n"
+        f"        return self.net(x)\n"
+        f"```\n"
+        f"\n"
+        f"Reply with ONE ```python code block containing only the class "
+        f"definition, and no other text."
+    )
+    if prior_attempt is None:
+        return contract
+    return (
+        f"Your previous attempt to write this module was REJECTED by "
+        f"validation.\n"
+        f"\n"
+        f"Rejection reason (exact):\n{prior_attempt.rejection_reason}\n"
+        f"\n"
+        f"Your previous code was:\n"
+        f"```python\n{prior_attempt.source}\n```\n"
+        f"\n"
+        f"Fix that specific issue and try again.\n"
+        f"\n"
+        f"{contract}"
+    )
+
+
+def extract_python_code(text: str) -> str:
+    """Pull the code out of a raw LLM response, and nothing more.
+
+    Handles, in order: a ```python fenced block; any generic ``` fenced
+    block; unfenced output with leading prose (slice from the first
+    class/def/import line to the end); finally the stripped raw text.
+    Deliberately does NOT try to repair the code beyond fence/prose
+    stripping -- if what comes out is still invalid, the foundry's
+    validation rejects it and the retry loop feeds the reason back, which
+    is the designed correction path.
+    """
+    fenced = re.search(r"```python\s*\n(.*?)```", text, re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    fenced = re.search(r"```\s*\n(.*?)```", text, re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"^(class |def |import |from )", line):
+            return "\n".join(lines[i:]).strip()
+    return text.strip()
+
+
+class GemmaExpertGenerator:
+    """Expert-source generator backed by a local Gemma-2-2b-it via transformers.
+
+    Same callable contract as :class:`MockLLMGenerator`:
+    ``generator(ctx, prior_attempt=None) -> str``. The model is loaded ONCE at
+    construction (reloading a 2B model per spike would stall the training
+    loop); each call is prompt -> generate -> extract code. Raw output is
+    only fence/prose-stripped -- foundry validation plus the retry loop's
+    rejection feedback handle everything else, by design.
+
+    Dependencies (transformers, accelerate, python-dotenv) are imported
+    lazily INSIDE ``__init__`` so this module stays importable -- and the
+    dependency-free test suite and ROCm container stay green -- when they
+    are not installed.
+
+    Timeout: generation gets a hard wall-clock budget, independent of the
+    foundry's instantiation timeout. Two layers: ``max_time`` bounds the
+    sampling loop inside ``generate()``, and the whole call runs in a daemon
+    worker thread joined with a grace margin -- a hung forward pass is
+    abandoned (thread keeps running, same documented pattern as the
+    foundry's smoke test) and a ``RuntimeError`` is raised, which the retry
+    loop's generator-crash path logs and survives.
+
+    Args:
+        model_name: HF model id (default ``google/gemma-2-2b-it``).
+        max_new_tokens: Budget for the class definition (default 400).
+        temperature: Low (0.2) -- favor correctness over creativity; retry
+            prompts differ per attempt, which provides the needed variation.
+        generate_timeout_s: Wall-clock budget for one generate call.
+        device_map: Passed to ``from_pretrained`` (default ``"cuda"``; works
+            identically on ROCm, which exposes the same torch.cuda surface).
+    """
+
+    def __init__(
+        self,
+        model_name: str = "google/gemma-2-2b-it",
+        *,
+        max_new_tokens: int = 400,
+        temperature: float = 0.2,
+        generate_timeout_s: float = 120.0,
+        device_map: str = "cuda",
+    ) -> None:
+        try:
+            from dotenv import load_dotenv
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as exc:
+            raise ImportError(
+                "GemmaExpertGenerator needs the optional LLM dependencies: "
+                "pip install transformers accelerate python-dotenv"
+            ) from exc
+
+        load_dotenv()
+        token = os.environ.get("HF_TOKEN")
+        if not token:
+            raise RuntimeError(
+                "HF_TOKEN not set (checked environment and .env); gemma-2 is "
+                "a gated model and needs an authenticated download"
+            )
+
+        self.model_name = model_name
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+        self.generate_timeout_s = generate_timeout_s
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            token=token,
+            dtype=torch.bfloat16,  # `torch_dtype` is deprecated in transformers
+            device_map=device_map,
+        )
+        self.model.eval()
+
+    def __call__(
+        self, ctx: FailureContext, prior_attempt: Optional[GenerationAttempt] = None
+    ) -> str:
+        prompt = build_gemma_prompt(ctx, prior_attempt)
+        # Gemma-2 has no system role; a single user turn carries everything.
+        # return_dict=True yields a BatchEncoding (input_ids + attention_mask):
+        # transformers >=5 no longer returns a bare tensor here, and generate()
+        # needs the mask anyway, so we unpack it with ** below.
+        enc = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+        )
+        enc = {k: v.to(self.model.device) for k, v in enc.items()}
+        input_len = enc["input_ids"].shape[1]
+
+        result: dict[str, Any] = {}
+
+        def _work() -> None:
+            try:
+                with torch.no_grad():
+                    out = self.model.generate(
+                        **enc,
+                        max_new_tokens=self.max_new_tokens,
+                        do_sample=True,
+                        temperature=self.temperature,
+                        top_p=0.9,
+                        # Layer 1: bounds the sampling loop wall-clock.
+                        max_time=self.generate_timeout_s,
+                    )
+                # Decode only the newly generated tokens (past the prompt).
+                result["text"] = self.tokenizer.decode(
+                    out[0][input_len:], skip_special_tokens=True
+                )
+            except BaseException as exc:  # surface to the caller
+                result["error"] = exc
+
+        # Layer 2: bounds a hung forward pass max_time cannot interrupt. On
+        # timeout the daemon worker is abandoned (Python cannot kill it) and
+        # we raise; the retry loop's generator-crash path takes it from there.
+        worker = threading.Thread(target=_work, daemon=True, name="gemma-generate")
+        worker.start()
+        worker.join(timeout=self.generate_timeout_s + 30.0)
+        if worker.is_alive():
+            raise RuntimeError(
+                f"Gemma generation exceeded {self.generate_timeout_s + 30.0:.0f}s "
+                f"wall-clock budget (worker thread abandoned)"
+            )
+        if "error" in result:
+            raise RuntimeError(
+                f"Gemma generation failed: {result['error']!r}"
+            ) from result["error"]
+        return extract_python_code(result["text"])
 
 
 def _rebuild_generated_expert(source: str, class_name: str) -> nn.Module:
@@ -1197,9 +1433,23 @@ if __name__ == "__main__":
         list(gate.parameters()) + list(experts.parameters()), lr=1e-3
     )
 
+    # Prefer the REAL Gemma-backed generator; fall back to the dependency-free
+    # template on any construction failure (missing transformers, no HF token,
+    # GPU OOM) so the demo always runs -- including inside the ROCm container
+    # image, which deliberately ships without transformers.
+    try:
+        generator = GemmaExpertGenerator()
+        generator_name = f"GemmaExpertGenerator({generator.model_name})"
+    except Exception as exc:  # noqa: BLE001 - any failure means fallback
+        generator = template_mlp_expert_source
+        generator_name = "template_mlp_expert_source (fallback)"
+        print(f"[demo] Gemma generator unavailable -> template fallback: {exc}")
+    print(f"[demo] expert source generator: {generator_name}")
+
     orch = TrainingOrchestrator(
         gate, experts, foundry, optimizer,
         log_path=DEMO_LOG,
+        expert_source_generator=generator,
         detector=RollingSpikeDetector(window=30, z_threshold=4.0, min_history=10),
         spike_cooldown_steps=DEMO_COOLDOWN,
         max_experts=DEMO_MAX_EXPERTS,
