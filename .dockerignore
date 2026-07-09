@@ -19,3 +19,12 @@ requirements-lock.txt
 plan.pdf
 *.md
 !README.md
+
+# Secrets and local artifacts must never enter the build context. The HF token
+# reaches the build ONLY as a BuildKit secret mount (see Dockerfile); .env is
+# defense-in-depth on top of the path-specific COPYs.
+.env
+.claude/
+*.jsonl
+*.ckpt
+orchestrator_viz.html

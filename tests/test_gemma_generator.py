@@ -135,15 +135,25 @@ def test_extract_code_from_realistic_responses():
 def test_gemma_live_end_to_end():
     if os.environ.get("NGEN_RUN_GEMMA_LIVE") != "1":
         _skip("live Gemma test is opt-in: set NGEN_RUN_GEMMA_LIVE=1")
-    if not torch.cuda.is_available():
-        _skip("live Gemma test needs a GPU")
+    # NGEN_GEMMA_DEVICE overrides the device (e.g. "cpu" for the Docker
+    # build-time gate: `docker build` never has GPU access on any host, so
+    # the in-image proof of the live generator MUST run on CPU). When unset,
+    # the original behavior holds: GPU required, else skip.
+    device = os.environ.get("NGEN_GEMMA_DEVICE")
+    if device is None:
+        if not torch.cuda.is_available():
+            _skip("live Gemma test needs a GPU (or set NGEN_GEMMA_DEVICE=cpu)")
+        device = "cuda"
     try:
         from dotenv import load_dotenv
         load_dotenv()
     except ImportError:
         pass
-    if not os.environ.get("HF_TOKEN"):
-        _skip("live Gemma test needs HF_TOKEN (env or .env)")
+    offline = (os.environ.get("HF_HUB_OFFLINE") == "1"
+               or os.environ.get("TRANSFORMERS_OFFLINE") == "1")
+    if not os.environ.get("HF_TOKEN") and not offline:
+        # Offline mode loads from the local/baked cache -- no token needed.
+        _skip("live Gemma test needs HF_TOKEN (env or .env) unless offline")
     try:
         import transformers  # noqa: F401
     except ImportError:
@@ -152,7 +162,16 @@ def test_gemma_live_end_to_end():
     from core.orchestrator import GemmaExpertGenerator
     from core.moe.dynamic_gating import ExpertValidationError
 
-    gen = GemmaExpertGenerator()
+    if device == "cpu":
+        # CPU generation of a 2B model is minutes-scale: shrink the token
+        # budget (a valid expert class fits comfortably in 250 tokens) and
+        # widen the wall-clock budget. Still a full end-to-end proof:
+        # load-from-cache -> generate -> foundry validation -> registration.
+        gen = GemmaExpertGenerator(
+            device_map="cpu", max_new_tokens=250, generate_timeout_s=900.0
+        )
+    else:
+        gen = GemmaExpertGenerator(device_map=device)
     gate = DynamicNoisyTopKGate(16, 4, k=2)
     experts = torch.nn.ModuleList(torch.nn.Linear(16, 16) for _ in range(4))
     foundry = ExpertFoundry(gate, experts, expert_input_dim=16, expert_output_dim=16)

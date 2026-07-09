@@ -23,3 +23,17 @@
 # to THIS file -- never torch/torchvision/torchaudio.
 
 pytest>=7.0
+
+# --- Gemma expert generator (LLM) deps ---------------------------------------
+# Pinned to the EXACT versions verified working with GemmaExpertGenerator on
+# the dev notebook (live generation + foundry registration confirmed).
+#
+# torch-safety note: none of these may pull a competing torch build. accelerate
+# declares a torch requirement, but the ROCm base image's preinstalled torch
+# already satisfies it, so pip resolves it as "Requirement already satisfied"
+# and downloads nothing. The Dockerfile has a post-install tripwire that FAILS
+# THE BUILD if torch.version.hip ever comes back empty (i.e. if a CUDA/CPU
+# wheel clobbered the ROCm build) -- do not remove that check.
+transformers==5.13.0
+accelerate==1.14.0
+python-dotenv==1.2.2

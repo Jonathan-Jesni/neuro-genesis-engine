@@ -531,7 +531,16 @@ class GemmaExpertGenerator:
 
         load_dotenv()
         token = os.environ.get("HF_TOKEN")
-        if not token:
+        # Offline mode (e.g. the Docker image, which bakes the weights into an
+        # image layer and sets HF_HUB_OFFLINE=1): loading from the local cache
+        # needs no auth, so a missing token is fine -- requiring one here would
+        # break the fully-offline container for no reason. Online mode still
+        # demands it: gemma-2 is a gated model and the download would 401.
+        offline = (
+            os.environ.get("HF_HUB_OFFLINE") == "1"
+            or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
+        )
+        if not token and not offline:
             raise RuntimeError(
                 "HF_TOKEN not set (checked environment and .env); gemma-2 is "
                 "a gated model and needs an authenticated download"

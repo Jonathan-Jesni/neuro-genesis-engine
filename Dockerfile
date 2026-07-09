@@ -8,8 +8,15 @@
 # non-torch Python deps, copy the source, and fail the build if the test suite
 # does not pass INSIDE the ROCm image.
 #
-# Build:
-#   docker build -t neuro-genesis:rocm .
+# Build (requires an HF token for the gated gemma-2 download -- passed as a
+# BuildKit secret so it NEVER lands in an image layer; BuildKit is the default
+# engine in Docker 23+):
+#   export HF_TOKEN=hf_...            # or set it in the shell from .env
+#   docker build --secret id=hf_token,env=HF_TOKEN -t neuro-genesis:rocm .
+#
+# The image bakes google/gemma-2-2b-it into an image layer at build time and
+# sets HF_HUB_OFFLINE=1, so the built container needs NO network access at
+# runtime (verify with: docker run --rm --network none ... pytest ...).
 #
 # Run the demo on GPU (device + group flags are REQUIRED for ROCm -- see the
 # non-root user note further down):
@@ -50,9 +57,12 @@ ENV PYTHONUNBUFFERED=1 \
     # /app on the path so the package's absolute imports (`from core.moe ...`)
     # resolve without an editable install.
     PYTHONPATH=/app \
-    # Single point of control for the entrypoint: swapping in the real Day-5
-    # demo is one line here (or a `-e DEMO=...` at runtime). See CMD at bottom.
-    DEMO=demo.py
+    # Single point of control for the entrypoint (override with `-e DEMO=...`).
+    # Default is the Gemma-backed orchestrator demo: its __main__ prefers
+    # GemmaExpertGenerator (deps + weights are baked into this image) and
+    # falls back to the template generator only if construction fails. The
+    # GPU smoke check remains available via `-e DEMO=demo.py`.
+    DEMO=core/orchestrator.py
 
 WORKDIR /app
 
@@ -94,6 +104,37 @@ RUN chown ngen:ngen /app
 COPY --chown=ngen:ngen requirements-docker.txt ./
 RUN python -m pip install --no-cache-dir -r requirements-docker.txt
 
+# Tripwire: fail the build IMMEDIATELY if the pip install above (transformers/
+# accelerate pull in many deps) clobbered the ROCm torch with a CUDA/CPU wheel.
+# torch.version.hip is only populated on ROCm builds.
+RUN python -c "import torch, transformers, accelerate; \
+    assert torch.version.hip, 'ROCm torch was clobbered by a non-HIP build!'; \
+    print('torch', torch.__version__, 'hip', torch.version.hip, \
+          '| transformers', transformers.__version__, \
+          '| accelerate', accelerate.__version__)"
+
+# --- Bake gemma-2-2b-it into the image (build-time, offline runtime) ---------
+# Placed BEFORE the source COPY so code-only changes reuse this ~5.5 GB layer.
+# HF_HOME points the cache at a fixed, ngen-readable path used at runtime too.
+#
+# The HF token (gemma-2 is a gated model) comes in as a BuildKit SECRET mount:
+# it exists only as a file during this single RUN step and is never written to
+# an ENV/ARG/layer -- `docker history` must never show a token value.
+# allow_patterns keeps the layer lean: config + safetensors + tokenizer only.
+ENV HF_HOME=/opt/hf-cache
+RUN --mount=type=secret,id=hf_token \
+    python -c "from huggingface_hub import snapshot_download; \
+snapshot_download('google/gemma-2-2b-it', \
+    token=open('/run/secrets/hf_token').read().strip(), \
+    allow_patterns=['*.json','*.safetensors','tokenizer*','*.model'])" \
+    && chown -R ngen:ngen /opt/hf-cache
+
+# From here on -- including the build-time test gate below and all runtime --
+# the HF stack is OFFLINE: loads must come from the baked cache, and any
+# accidental network dependence fails loudly instead of silently downloading.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
 # --- Source (changes most often -> last, so deps stay cached) ---------------
 COPY --chown=ngen:ngen core/ ./core/
 COPY --chown=ngen:ngen tests/ ./tests/
@@ -113,6 +154,15 @@ USER ngen
 # demo.py. We also print torch's HIP build string as a breadcrumb in build logs.
 RUN python -c "import torch; print('torch', torch.__version__, 'hip', torch.version.hip)" \
     && pytest tests/ -v
+
+# --- Build-time LIVE Gemma gate ----------------------------------------------
+# The point of baking the model in: prove the REAL generator works inside this
+# image -- load gemma-2-2b-it from the baked cache (offline env is already
+# set), generate expert source, and register it through the real foundry.
+# Runs on CPU because `docker build` never has GPU access (on any host); the
+# same generator's GPU path is exercised at runtime on the AMD box. Expect
+# this step to take several minutes (2B-model CPU generation).
+RUN NGEN_RUN_GEMMA_LIVE=1 NGEN_GEMMA_DEVICE=cpu pytest tests/test_gemma_generator.py -v
 
 # --- Entrypoint -------------------------------------------------------------
 # Runs the demo by default. Overriding the demo is a one-line change: edit the
