@@ -39,6 +39,9 @@ datasets/
 *.csv
 *.jsonl
 
+# except: canonical demo log the visualizer fetches at runtime
+!orchestrator_run_amd_hardware.jsonl
+
 # OS Generated Files
 .DS_Store
 Thumbs.db
