@@ -1330,6 +1330,8 @@ function render(t) {
 }
 
 function frame(ts) {
+  // No log loaded yet (async fetch still in flight): idle until boot() inits.
+  if (!M) { lastFrame = ts; requestAnimationFrame(frame); return; }
   if (playing) {
     if (lastFrame !== null) {
       T += (ts - lastFrame) * speed;
@@ -1381,8 +1383,31 @@ document.addEventListener("drop", async (e) => {
 });
 
 // ------------------------------ boot ------------------------------
-init(document.getElementById("logdata").textContent);
-requestAnimationFrame(frame);   // start the master clock (render loop)
+// Load order: (1) live fetch of the current log on disk when served over
+// HTTP, (2) the embedded snapshot baked into this file, (3) drag-drop at any
+// time (above) overrides both. A fresh HTTP fetch wins so the page reflects
+// the current file without a rebuild; the embedded copy keeps the file fully
+// standalone when double-clicked.
+async function boot() {
+  const embedded = document.getElementById("logdata").textContent;
+  // Only fetch when served over http(s). Under file:// a fetch of a local URL
+  // is not merely rejected — the browser emits its OWN console error that a
+  // try/catch cannot suppress — so we skip it entirely and use the embedded
+  // snapshot. Same two real outcomes (double-click => embedded, served =>
+  // live file), with a guaranteed-clean console in the file:// case.
+  if (location.protocol !== "file:") {
+    try {
+      const res = await fetch("./orchestrator_run_amd_hardware.jsonl", { cache: "no-store" });
+      if (res.ok) {
+        const text = await res.text();
+        if (text.trim()) { init(text); return; }   // live disk copy wins
+      }
+    } catch (e) { /* served but unreachable/missing => fall back to embedded */ }
+  }
+  init(embedded);
+}
+boot();
+requestAnimationFrame(frame);   // start the master clock (idles until boot inits)
 </script>
 </body>
 </html>
