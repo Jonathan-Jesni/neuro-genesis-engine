@@ -1,0 +1,8 @@
+{
+    "rewrites": [
+        {
+            "source": "/",
+            "destination": "/orchestrator_viz.html"
+        }
+    ]
+}
