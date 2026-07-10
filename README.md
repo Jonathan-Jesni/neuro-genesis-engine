@@ -131,6 +131,10 @@ If the GPU is invisible inside the container, the host's `render` group GID like
 
 [`orchestrator_viz.html`](orchestrator_viz.html) is a self-contained, animated playback of a real training run: the expert network growing node by node, the live loss curve, and the spike → generate → validate → register pipeline firing in sequence.
 
+**Live: <https://neuro-genesis-engine.vercel.app/>** — the AMD-hardware run, no setup needed.
+
+Or run it locally:
+
 - **Open it:** double-click the file (it carries an embedded snapshot of the AMD-hardware run, so `file://` works), or serve the repo root so it live-fetches the sibling log:
 
   ```bash
