@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuro-genesis-engine"
+version = "0.2.0"
+description = "Self-expanding Mixture-of-Experts: live expert growth for continual pretraining"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+# NOTE: the ROCm Docker image must NOT `pip install -e .` — it would pull a
+# CPU/CUDA torch wheel over the preinstalled ROCm build. The Dockerfile uses
+# requirements-docker.txt for exactly this reason.
+dependencies = [
+    "torch>=2.2",
+    "numpy",
+]
+
+[project.optional-dependencies]
+experiments = ["datasets", "tiktoken", "pyyaml", "matplotlib"]
+gemma = ["transformers>=4.56", "accelerate", "python-dotenv"]
+test = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "experiments*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -6,6 +6,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
 *.so
 
 # Virtual Environments
@@ -45,3 +46,7 @@ datasets/
 # OS Generated Files
 .DS_Store
 Thumbs.db
+# Experiment outputs: keep only the summary table and figures under version control
+results/*
+!results/summary.csv
+!results/figures/
