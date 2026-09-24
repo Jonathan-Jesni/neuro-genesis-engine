@@ -34,9 +34,19 @@ DOMAINS: dict[str, tuple[str, str]] = {
     "math": ("open-web-math/open-web-math", "text"),
 }
 
-ENC = tiktoken.get_encoding("gpt2")
-EOT = ENC.eot_token  # 50256 — fits uint16
+EOT = 50256  # GPT-2 <|endoftext|> — fits uint16
 BATCH_DOCS = 512
+_ENC = None
+
+
+def _encoder():
+    """Load the tokenizer lazily: it downloads its vocab on first use, and a
+    machine with cached data (e.g. a proxied cloud box) must not need that."""
+    global _ENC
+    if _ENC is None:
+        _ENC = tiktoken.get_encoding("gpt2")
+        assert _ENC.eot_token == EOT
+    return _ENC
 
 
 def _load_hf_token() -> None:
@@ -78,7 +88,7 @@ def prepare_domain(
 
     def flush(texts: list[str], start_idx: int) -> bool:
         nonlocal n_train, n_val, docs_train, docs_val
-        for i, ids in enumerate(ENC.encode_ordinary_batch(texts)):
+        for i, ids in enumerate(_encoder().encode_ordinary_batch(texts)):
             ids.append(EOT)
             to_val = (start_idx + i) % val_every == 0 and n_val < val_tokens
             if to_val:
