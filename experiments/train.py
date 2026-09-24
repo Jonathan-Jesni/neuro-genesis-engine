@@ -31,6 +31,7 @@ from typing import Any
 
 import torch
 import yaml
+from torch import Tensor
 
 from core.orchestrator import RollingSpikeDetector
 from experiments.data import DomainStream, HeldOut
@@ -62,6 +63,12 @@ DEFAULTS: dict[str, Any] = {
     "cooldown_steps": 300,
     "signal_grow": 1,
     "max_experts": 32,
+    # protection applied at every growth event (oracle or signal arms):
+    #   none     — everything keeps training (plain growth)
+    #   experts  — freeze pre-existing experts + their router columns
+    #   all      — also freeze every shared weight (embeddings, attention, norms);
+    #              only the new experts and their router columns train
+    "freeze": "none",
 }
 
 
@@ -117,6 +124,50 @@ def evaluate(model: MoEGPT, heldout: HeldOut, device: torch.device, amp: bool) -
     return out
 
 
+class Freezer:
+    """Protects already-learned weights after a growth event.
+
+    Whole tensors (old experts, shared weights) get ``requires_grad=False``, so
+    AdamW never touches them (no grad => no update, no weight decay). Router
+    columns cannot be frozen per column that way, so the old columns of each
+    gate are snapshotted and copied back after every optimizer step. The gate
+    swaps its Parameter objects on expand(), so we always re-read
+    ``gate.w_gate`` / ``gate.w_noise`` rather than caching them.
+    """
+
+    def __init__(self, mode: str) -> None:
+        if mode not in ("none", "experts", "all"):
+            raise ValueError(f"unknown freeze mode {mode!r}")
+        self.mode = mode
+        self.router_snap: list[tuple[int, Tensor, Tensor]] = []   # per layer
+
+    def after_growth(self, model: MoEGPT, n_new: int) -> None:
+        if self.mode == "none":
+            return
+        self.router_snap = []
+        for layer in model.moe_layers:
+            n_old = layer.num_experts - n_new
+            for e in range(n_old):
+                for p in layer.experts[e].parameters():
+                    p.requires_grad_(False)
+            with torch.no_grad():
+                self.router_snap.append((
+                    n_old,
+                    layer.gate.w_gate[:, :n_old].detach().clone(),
+                    layer.gate.w_noise[:, :n_old].detach().clone(),
+                ))
+        if self.mode == "all":
+            for name, p in model.named_parameters():
+                if ".moe." not in name:
+                    p.requires_grad_(False)
+
+    @torch.no_grad()
+    def after_step(self, model: MoEGPT) -> None:
+        for layer, (n_old, wg, wn) in zip(model.moe_layers, self.router_snap):
+            layer.gate.w_gate[:, :n_old].copy_(wg)
+            layer.gate.w_noise[:, :n_old].copy_(wn)
+
+
 class RunLog:
     def __init__(self, run_dir: Path) -> None:
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -165,9 +216,10 @@ def run(cfg: dict, seed: int) -> dict:
     if arm not in ("static", "oracle", "signal"):
         raise ValueError(f"unknown arm {arm!r}")
     detector = RollingSpikeDetector(**cfg["detector"]) if arm == "signal" else None
+    freezer = Freezer(cfg["freeze"])
     last_growth = -10**9
 
-    print(f"[{run_name}] arm={arm} device={device} params={count_params(model)/1e6:.1f}M "
+    print(f"[{run_name}] arm={arm} freeze={cfg['freeze']} device={device} params={count_params(model)/1e6:.1f}M "
           f"experts/layer={model.num_experts} steps={total} ({steps_per_phase}/phase)", flush=True)
 
     phase_end: dict[str, dict[str, float]] = {}
@@ -185,6 +237,7 @@ def run(cfg: dict, seed: int) -> dict:
         if grow_reason:
             for _ in range(n_grow):
                 model.grow(opt, tag=f"S{step}")
+            freezer.after_growth(model, n_grow)
             log.write("events", {"step": step, "reason": grow_reason,
                                  "experts": model.num_experts, "domain": b.domain_id})
 
@@ -200,6 +253,7 @@ def run(cfg: dict, seed: int) -> dict:
         if cfg["grad_clip"]:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
         opt.step()
+        freezer.after_step(model)
 
         lval = loss.item()
         loss_acc += lval
@@ -213,6 +267,7 @@ def run(cfg: dict, seed: int) -> dict:
             if spike and cooled and model.num_experts < cfg["max_experts"]:
                 for _ in range(cfg["signal_grow"]):
                     model.grow(opt, tag=f"S{step}")
+                freezer.after_growth(model, cfg["signal_grow"])
                 last_growth = step
                 # Reset: a sustained shift would otherwise keep every later step
                 # a "spike" (spikes never enter the baseline history).
@@ -251,7 +306,7 @@ def run(cfg: dict, seed: int) -> dict:
     final = phase_end[cfg["domains"][-1]]
     forgetting = {d: final[d] - phase_end[d][d] for d in cfg["domains"][:-1]}
     summary = {
-        "run": run_name, "arm": arm, "seed": seed,
+        "run": run_name, "arm": arm, "seed": seed, "freeze": cfg["freeze"],
         "phase_end": phase_end, "final": final,
         "final_avg": sum(final.values()) / len(final),
         "forgetting": forgetting,

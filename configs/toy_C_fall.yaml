@@ -1,0 +1,6 @@
+# Arm C + freeze=all: oracle growth; on growth freeze old experts, their router
+# columns, and all shared weights. Only new experts + new router columns train.
+arm: oracle
+oracle_grow: 1
+freeze: all
+model: {n_experts: 4}

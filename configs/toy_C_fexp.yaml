@@ -1,0 +1,5 @@
+# Arm C + freeze=experts: oracle growth; freeze old experts + router columns only.
+arm: oracle
+oracle_grow: 1
+freeze: experts
+model: {n_experts: 4}

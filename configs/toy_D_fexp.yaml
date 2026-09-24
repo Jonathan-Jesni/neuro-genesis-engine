@@ -1,0 +1,6 @@
+# Arm D + freeze=experts: signal growth; freeze old experts + router columns only.
+arm: signal
+freeze: experts
+model: {n_experts: 4}
+detector: {window: 50, z_threshold: 4.0, min_history: 20}
+cooldown_steps: 300
