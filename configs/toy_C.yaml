@@ -1,0 +1,5 @@
+# Arm C: oracle expansion — +1 expert/layer at each TRUE domain boundary.
+# (Freezing old experts is a week-2 addition.)
+arm: oracle
+oracle_grow: 1
+model: {n_experts: 4}

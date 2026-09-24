@@ -1,0 +1,4 @@
+# Arm B: static MoE at the final size of the growing arms (4 + 2 boundaries = 6).
+# Update n_experts to arm D's mean final count once D has run.
+arm: static
+model: {n_experts: 6}

@@ -1,0 +1,3 @@
+# Arm A: static MoE, 4 experts/layer. Tiny GPT, 10M tokens per domain.
+arm: static
+model: {n_experts: 4}
