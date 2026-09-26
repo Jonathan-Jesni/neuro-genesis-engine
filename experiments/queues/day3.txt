@@ -1,0 +1,31 @@
+# Day 3 (2026-09-26): recover plasticity under freeze=all by growing more experts
+# per boundary; oracle reference at k=4; fill the missing seeds from day 2.
+# ~4-7 min per run on the W7900D. Priority order: seed 0 of the sweep first.
+
+# --- capacity sweep, seed 0 ---
+toy_D_fall_k4  configs/toy_D_fall.yaml  0  --set signal_grow=4
+toy_D_fall_k8  configs/toy_D_fall.yaml  0  --set signal_grow=8
+toy_D_fall_k2  configs/toy_D_fall.yaml  0  --set signal_grow=2
+toy_C_fall_k4  configs/toy_C_fall.yaml  0  --set oracle_grow=4
+
+# --- capacity sweep, seed 1 ---
+toy_D_fall_k4  configs/toy_D_fall.yaml  1  --set signal_grow=4
+toy_D_fall_k8  configs/toy_D_fall.yaml  1  --set signal_grow=8
+toy_D_fall_k2  configs/toy_D_fall.yaml  1  --set signal_grow=2
+toy_C_fall_k4  configs/toy_C_fall.yaml  1  --set oracle_grow=4
+
+# --- complete day-2 freeze=all (k=1) to 3 seeds ---
+toy_C_fall     configs/toy_C_fall.yaml  2
+toy_D_fall     configs/toy_D_fall.yaml  2
+
+# --- capacity sweep, seed 2 ---
+toy_D_fall_k4  configs/toy_D_fall.yaml  2  --set signal_grow=4
+toy_D_fall_k8  configs/toy_D_fall.yaml  2  --set signal_grow=8
+toy_D_fall_k2  configs/toy_D_fall.yaml  2  --set signal_grow=2
+toy_C_fall_k4  configs/toy_C_fall.yaml  2  --set oracle_grow=4
+
+# --- complete day-2 freeze=experts to 3 seeds ---
+toy_C_fexp     configs/toy_C_fexp.yaml  1
+toy_D_fexp     configs/toy_D_fexp.yaml  1
+toy_C_fexp     configs/toy_C_fexp.yaml  2
+toy_D_fexp     configs/toy_D_fexp.yaml  2

@@ -110,18 +110,33 @@ def lr_at(step: int, total: int, cfg: dict) -> float:
 
 
 @torch.no_grad()
-def evaluate(model: MoEGPT, heldout: HeldOut, device: torch.device, amp: bool) -> dict[str, float]:
+def evaluate(
+    model: MoEGPT, heldout: HeldOut, device: torch.device, amp: bool
+) -> tuple[dict[str, float], dict[str, list[list[float]]]]:
+    """Held-out loss per domain, plus where each domain's tokens are routed.
+
+    ``route[dom][layer][expert]`` is the fraction of that domain's top-k routing
+    slots going to each expert (eval mode: deterministic, no router noise). Under
+    freeze=all it is the direct measure of how much old-domain traffic the new
+    experts capture — the only path left by which an old domain can degrade.
+    """
     model.eval()
-    out = {}
+    out: dict[str, float] = {}
+    route: dict[str, list[list[float]]] = {}
     for dom, batches in heldout.batches.items():
         tot = 0.0
+        acc: list[list[float]] | None = None
         for x, y in batches:
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
                 _, loss, _ = model(x.to(device), y.to(device))
             tot += loss.item()
+            loads = [st["load"] for st in model.routing_stats()]
+            acc = loads if acc is None else [[a + b for a, b in zip(ra, rb)]
+                                             for ra, rb in zip(acc, loads)]
         out[dom] = tot / len(batches)
+        route[dom] = [[v / len(batches) for v in row] for row in acc]
     model.train()
-    return out
+    return out, route
 
 
 class Freezer:
@@ -291,10 +306,10 @@ def run(cfg: dict, seed: int) -> dict:
 
         is_phase_end = b.phase_step == steps_per_phase - 1
         if (step + 1) % cfg["eval_every"] == 0 or is_phase_end:
-            ev = evaluate(model, heldout, device, amp)
+            ev, route = evaluate(model, heldout, device, amp)
             log.write("evals", {"step": step, "domain": b.domain_id,
                                 "phase_end": is_phase_end, "experts": model.num_experts,
-                                "loss": ev})
+                                "loss": ev, "route": route})
             if is_phase_end:
                 phase_end[cfg["domains"][b.domain_id]] = ev
             rate = (step + 1) * tokens_per_step / (time.time() - t0)

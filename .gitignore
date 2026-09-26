@@ -50,3 +50,6 @@ Thumbs.db
 results/*
 !results/summary.csv
 !results/figures/
+
+# Downloaded cloud result bundles
+*.tar.gz
