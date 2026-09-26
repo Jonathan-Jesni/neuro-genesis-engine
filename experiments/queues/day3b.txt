@@ -1,0 +1,16 @@
+# Day 3b (2026-09-26): freeze=all_but_emb — everything old frozen EXCEPT the tied
+# token embeddings/output head. Day-3 sweep showed k=1..8 experts could not
+# recover plasticity under freeze=all; hypothesis: the frozen tied head is the
+# bottleneck. ~4-5 min per run.
+
+toy_D_femb     configs/toy_D_fall.yaml  0  --set freeze=all_but_emb
+toy_C_femb     configs/toy_C_fall.yaml  0  --set freeze=all_but_emb
+toy_D_femb_k4  configs/toy_D_fall.yaml  0  --set freeze=all_but_emb --set signal_grow=4
+
+toy_D_femb     configs/toy_D_fall.yaml  1  --set freeze=all_but_emb
+toy_C_femb     configs/toy_C_fall.yaml  1  --set freeze=all_but_emb
+toy_D_femb_k4  configs/toy_D_fall.yaml  1  --set freeze=all_but_emb --set signal_grow=4
+
+toy_D_femb     configs/toy_D_fall.yaml  2  --set freeze=all_but_emb
+toy_C_femb     configs/toy_C_fall.yaml  2  --set freeze=all_but_emb
+toy_D_femb_k4  configs/toy_D_fall.yaml  2  --set freeze=all_but_emb --set signal_grow=4

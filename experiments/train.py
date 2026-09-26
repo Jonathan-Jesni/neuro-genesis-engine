@@ -68,6 +68,10 @@ DEFAULTS: dict[str, Any] = {
     #   experts  — freeze pre-existing experts + their router columns
     #   all      — also freeze every shared weight (embeddings, attention, norms);
     #              only the new experts and their router columns train
+    #   all_but_emb — as "all", but token embeddings stay trainable. They are
+    #              TIED to the output head, so freezing them after domain 1 also
+    #              freezes the model's ability to predict new-domain tokens
+    #              (day-3 finding: capacity k=1..8 did not recover plasticity).
     "freeze": "none",
 }
 
@@ -151,7 +155,7 @@ class Freezer:
     """
 
     def __init__(self, mode: str) -> None:
-        if mode not in ("none", "experts", "all"):
+        if mode not in ("none", "experts", "all", "all_but_emb"):
             raise ValueError(f"unknown freeze mode {mode!r}")
         self.mode = mode
         self.router_snap: list[tuple[int, Tensor, Tensor]] = []   # per layer
@@ -171,9 +175,10 @@ class Freezer:
                     layer.gate.w_gate[:, :n_old].detach().clone(),
                     layer.gate.w_noise[:, :n_old].detach().clone(),
                 ))
-        if self.mode == "all":
+        if self.mode in ("all", "all_but_emb"):
+            keep = {"tok.weight"} if self.mode == "all_but_emb" else set()
             for name, p in model.named_parameters():
-                if ".moe." not in name:
+                if ".moe." not in name and name not in keep:
                     p.requires_grad_(False)
 
     @torch.no_grad()
