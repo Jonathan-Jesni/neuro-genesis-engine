@@ -301,7 +301,12 @@ def run(cfg: dict, seed: int) -> dict:
     seen_counts = torch.zeros(mcfg.vocab_size, dtype=torch.long, device=device)
     replay = (ReplayBuffer(cfg["replay_capacity"], mcfg.seq_len, seed + 10_007)
               if cfg["replay_frac"] > 0 else None)
-    n_replay = int(round(cfg["replay_frac"] * cfg["batch_size"]))
+    # Expected replay rows per batch may be fractional (1% of 32 = 0.32): take
+    # the integer part every step plus one more with probability = remainder.
+    # The extra draw only happens when the remainder is non-zero, so integer
+    # settings (25% of 32 = 8) consume no RNG and reproduce earlier runs exactly.
+    n_replay_base, n_replay_rem = divmod(cfg["replay_frac"] * cfg["batch_size"], 1.0)
+    n_replay_base = int(n_replay_base)
 
     print(f"[{run_name}] arm={arm} freeze={cfg['freeze']} replay={cfg['replay_frac']} "
           f"confirm={cfg['confirm_steps']} device={device} params={count_params(model)/1e6:.1f}M "
@@ -332,7 +337,12 @@ def run(cfg: dict, seed: int) -> dict:
 
         bx, by = b.x, b.y
         fresh = cfg["batch_size"]
-        if replay is not None and replay.size > 0 and n_replay > 0:
+        n_replay = 0
+        if replay is not None and replay.size > 0:
+            n_replay = n_replay_base
+            if n_replay_rem > 1e-9 and replay.rng.random() < n_replay_rem:
+                n_replay += 1
+        if n_replay > 0:
             fresh = cfg["batch_size"] - n_replay
             rx, ry = replay.sample(n_replay)
             bx = torch.cat([b.x[:fresh], rx])
