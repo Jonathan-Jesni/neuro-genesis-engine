@@ -27,8 +27,9 @@ import json
 import math
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+import numpy as np
 import torch
 import yaml
 from torch import Tensor
@@ -72,7 +73,20 @@ DEFAULTS: dict[str, Any] = {
     #              TIED to the output head, so freezing them after domain 1 also
     #              freezes the model's ability to predict new-domain tokens
     #              (day-3 finding: capacity k=1..8 did not recover plasticity).
+    #   all_seen_emb — as "all_but_emb", but embedding rows of tokens already
+    #              seen >= seen_min_count times (running count over training
+    #              inputs — task-free, no domain labels) are frozen too; only
+    #              rows of rarely/never-seen tokens stay trainable
     "freeze": "none",
+    "seen_min_count": 100,
+    # task-free replay: reservoir sample of past training windows (no domain
+    # labels); replay_frac of every batch is replaced by buffer samples
+    "replay_frac": 0.0,
+    "replay_capacity": 4096,
+    # signal arm: fire only after this many CONSECUTIVE spike steps (1 = old
+    # behaviour). Guards against a single noisy batch triggering growth, whose
+    # cooldown then masks the real boundary (day-2 seed-2 failure).
+    "confirm_steps": 1,
 }
 
 
@@ -155,12 +169,15 @@ class Freezer:
     """
 
     def __init__(self, mode: str) -> None:
-        if mode not in ("none", "experts", "all", "all_but_emb"):
+        if mode not in ("none", "experts", "all", "all_but_emb", "all_seen_emb"):
             raise ValueError(f"unknown freeze mode {mode!r}")
         self.mode = mode
         self.router_snap: list[tuple[int, Tensor, Tensor]] = []   # per layer
+        self.emb_rows: Optional[Tensor] = None                     # frozen token ids
+        self.emb_snap: Optional[Tensor] = None
 
-    def after_growth(self, model: MoEGPT, n_new: int) -> None:
+    def after_growth(self, model: MoEGPT, n_new: int,
+                     seen_counts: Optional[Tensor] = None, min_count: int = 1) -> None:
         if self.mode == "none":
             return
         self.router_snap = []
@@ -175,17 +192,59 @@ class Freezer:
                     layer.gate.w_gate[:, :n_old].detach().clone(),
                     layer.gate.w_noise[:, :n_old].detach().clone(),
                 ))
-        if self.mode in ("all", "all_but_emb"):
-            keep = {"tok.weight"} if self.mode == "all_but_emb" else set()
+        if self.mode in ("all", "all_but_emb", "all_seen_emb"):
+            keep = {"tok.weight"} if self.mode in ("all_but_emb", "all_seen_emb") else set()
             for name, p in model.named_parameters():
                 if ".moe." not in name and name not in keep:
                     p.requires_grad_(False)
+        if self.mode == "all_seen_emb":
+            if seen_counts is None:
+                raise ValueError("all_seen_emb needs seen_counts")
+            # Cumulative counts => the frozen set only ever grows across events.
+            self.emb_rows = (seen_counts >= min_count).nonzero(as_tuple=True)[0]
+            with torch.no_grad():
+                self.emb_snap = model.tok.weight[self.emb_rows].detach().clone()
 
     @torch.no_grad()
     def after_step(self, model: MoEGPT) -> None:
         for layer, (n_old, wg, wn) in zip(model.moe_layers, self.router_snap):
             layer.gate.w_gate[:, :n_old].copy_(wg)
             layer.gate.w_noise[:, :n_old].copy_(wn)
+        if self.emb_rows is not None:
+            model.tok.weight[self.emb_rows] = self.emb_snap
+
+
+class ReplayBuffer:
+    """Reservoir sample of past training windows (x plus the final target token).
+
+    Task-free: every fresh window is offered to the reservoir regardless of
+    which domain it came from, so the buffer is a uniform sample of everything
+    seen so far. Lives on CPU (4096 x 257 int32 ~ 4 MB).
+    """
+
+    def __init__(self, capacity: int, seq_len: int, seed: int) -> None:
+        self.buf = torch.empty(capacity, seq_len + 1, dtype=torch.int32)
+        self.capacity = capacity
+        self.size = 0
+        self.seen = 0
+        self.rng = np.random.default_rng(seed)
+
+    def add(self, x: Tensor, y: Tensor) -> None:
+        win = torch.cat([x, y[:, -1:]], dim=1).to(torch.int32)
+        for row in win:
+            if self.size < self.capacity:
+                self.buf[self.size] = row
+                self.size += 1
+            else:
+                j = int(self.rng.integers(0, self.seen + 1))
+                if j < self.capacity:
+                    self.buf[j] = row
+            self.seen += 1
+
+    def sample(self, n: int) -> tuple[Tensor, Tensor]:
+        idx = torch.from_numpy(self.rng.integers(0, self.size, size=n))
+        w = self.buf[idx].to(torch.int64)
+        return w[:, :-1], w[:, 1:]
 
 
 class RunLog:
@@ -238,8 +297,14 @@ def run(cfg: dict, seed: int) -> dict:
     detector = RollingSpikeDetector(**cfg["detector"]) if arm == "signal" else None
     freezer = Freezer(cfg["freeze"])
     last_growth = -10**9
+    consec = 0
+    seen_counts = torch.zeros(mcfg.vocab_size, dtype=torch.long, device=device)
+    replay = (ReplayBuffer(cfg["replay_capacity"], mcfg.seq_len, seed + 10_007)
+              if cfg["replay_frac"] > 0 else None)
+    n_replay = int(round(cfg["replay_frac"] * cfg["batch_size"]))
 
-    print(f"[{run_name}] arm={arm} freeze={cfg['freeze']} device={device} params={count_params(model)/1e6:.1f}M "
+    print(f"[{run_name}] arm={arm} freeze={cfg['freeze']} replay={cfg['replay_frac']} "
+          f"confirm={cfg['confirm_steps']} device={device} params={count_params(model)/1e6:.1f}M "
           f"experts/layer={model.num_experts} steps={total} ({steps_per_phase}/phase)", flush=True)
 
     phase_end: dict[str, dict[str, float]] = {}
@@ -257,7 +322,7 @@ def run(cfg: dict, seed: int) -> dict:
         if grow_reason:
             for _ in range(n_grow):
                 model.grow(opt, tag=f"S{step}")
-            freezer.after_growth(model, n_grow)
+            freezer.after_growth(model, n_grow, seen_counts, cfg["seen_min_count"])
             log.write("events", {"step": step, "reason": grow_reason,
                                  "experts": model.num_experts, "domain": b.domain_id})
 
@@ -265,7 +330,15 @@ def run(cfg: dict, seed: int) -> dict:
         for g in opt.param_groups:          # includes groups added by growth
             g["lr"] = lr
 
-        x, y = b.x.to(device, non_blocking=True), b.y.to(device, non_blocking=True)
+        bx, by = b.x, b.y
+        fresh = cfg["batch_size"]
+        if replay is not None and replay.size > 0 and n_replay > 0:
+            fresh = cfg["batch_size"] - n_replay
+            rx, ry = replay.sample(n_replay)
+            bx = torch.cat([b.x[:fresh], rx])
+            by = torch.cat([b.y[:fresh], ry])
+        x, y = bx.to(device, non_blocking=True), by.to(device, non_blocking=True)
+        seen_counts += torch.bincount(x.reshape(-1), minlength=mcfg.vocab_size)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
             _, loss, aux = model(x, y)
         opt.zero_grad(set_to_none=True)
@@ -274,6 +347,8 @@ def run(cfg: dict, seed: int) -> dict:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
         opt.step()
         freezer.after_step(model)
+        if replay is not None:
+            replay.add(b.x[:fresh], b.y[:fresh])
 
         lval = loss.item()
         loss_acc += lval
@@ -283,12 +358,16 @@ def run(cfg: dict, seed: int) -> dict:
         # ---- signal arm: detector sees the loss AFTER the step ------------
         if detector is not None:
             spike = detector.update(lval)
+            consec = consec + 1 if spike else 0
             cooled = step - last_growth >= cfg["cooldown_steps"]
-            if spike and cooled and model.num_experts < cfg["max_experts"]:
+            if (consec >= cfg["confirm_steps"] and cooled
+                    and model.num_experts < cfg["max_experts"]):
                 for _ in range(cfg["signal_grow"]):
                     model.grow(opt, tag=f"S{step}")
-                freezer.after_growth(model, cfg["signal_grow"])
+                freezer.after_growth(model, cfg["signal_grow"], seen_counts,
+                                     cfg["seen_min_count"])
                 last_growth = step
+                consec = 0
                 # Reset: a sustained shift would otherwise keep every later step
                 # a "spike" (spikes never enter the baseline history).
                 detector = RollingSpikeDetector(**cfg["detector"])
@@ -327,6 +406,7 @@ def run(cfg: dict, seed: int) -> dict:
     forgetting = {d: final[d] - phase_end[d][d] for d in cfg["domains"][:-1]}
     summary = {
         "run": run_name, "arm": arm, "seed": seed, "freeze": cfg["freeze"],
+        "replay_frac": cfg["replay_frac"],
         "phase_end": phase_end, "final": final,
         "final_avg": sum(final.values()) / len(final),
         "forgetting": forgetting,

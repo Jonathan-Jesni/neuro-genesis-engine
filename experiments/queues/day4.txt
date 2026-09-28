@@ -1,0 +1,34 @@
+# Day 4 (2026-09-27): attack the two measured forgetting channels.
+#   - tied embeddings  -> freeze=all_seen_emb (freeze rows of tokens already seen
+#                         >= 100 times; task-free running counts)
+#   - router leak      -> task-free replay (25% of each batch from a reservoir of
+#                         past windows), also the standard replay baseline
+# Signal arms use confirm_steps=3 (fire after 3 consecutive spike steps).
+# ~4-5 min per run. Priority: seed 0 of every arm first.
+
+# --- seed 0 ---
+toy_A_replay        configs/toy_A.yaml       0  --set replay_frac=0.25
+toy_D_seen          configs/toy_D_fall.yaml  0  --set freeze=all_seen_emb --set confirm_steps=3
+toy_D_fall_replay   configs/toy_D_fall.yaml  0  --set replay_frac=0.25 --set confirm_steps=3
+toy_D_seen_replay   configs/toy_D_fall.yaml  0  --set freeze=all_seen_emb --set replay_frac=0.25 --set confirm_steps=3
+toy_D_replay        configs/toy_D.yaml       0  --set replay_frac=0.25 --set confirm_steps=3
+toy_C_seen          configs/toy_C_fall.yaml  0  --set freeze=all_seen_emb
+
+# --- seed 1 ---
+toy_A_replay        configs/toy_A.yaml       1  --set replay_frac=0.25
+toy_D_seen          configs/toy_D_fall.yaml  1  --set freeze=all_seen_emb --set confirm_steps=3
+toy_D_fall_replay   configs/toy_D_fall.yaml  1  --set replay_frac=0.25 --set confirm_steps=3
+toy_D_seen_replay   configs/toy_D_fall.yaml  1  --set freeze=all_seen_emb --set replay_frac=0.25 --set confirm_steps=3
+toy_D_replay        configs/toy_D.yaml       1  --set replay_frac=0.25 --set confirm_steps=3
+toy_C_seen          configs/toy_C_fall.yaml  1  --set freeze=all_seen_emb
+
+# --- seed 2 ---
+toy_A_replay        configs/toy_A.yaml       2  --set replay_frac=0.25
+toy_D_seen          configs/toy_D_fall.yaml  2  --set freeze=all_seen_emb --set confirm_steps=3
+toy_D_fall_replay   configs/toy_D_fall.yaml  2  --set replay_frac=0.25 --set confirm_steps=3
+toy_D_seen_replay   configs/toy_D_fall.yaml  2  --set freeze=all_seen_emb --set replay_frac=0.25 --set confirm_steps=3
+toy_D_replay        configs/toy_D.yaml       2  --set replay_frac=0.25 --set confirm_steps=3
+toy_C_seen          configs/toy_C_fall.yaml  2  --set freeze=all_seen_emb
+
+# --- reproducibility check: must equal day-1 toy_A_s0 (4.343 / +1.518) exactly ---
+toy_A_repro         configs/toy_A.yaml       0
