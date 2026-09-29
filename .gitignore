@@ -53,3 +53,4 @@ results/*
 
 # Downloaded cloud result bundles
 *.tar.gz
+!results/NOTES.md

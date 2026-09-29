@@ -9,6 +9,11 @@ Figures:
     detection    table of growth events vs true boundaries (latency, false triggers) -> stdout + csv
     tradeoff     stability-plasticity scatter: forgetting vs new-domain loss, one point per arm
     leak         router leak: share of each OLD domain's tokens routed to experts born later
+    leakplot     scatter of router leak vs forgetting on the first domain, one dot per run
+    detectplot   training loss + expert count with true boundaries and detector firings
+
+Use --arms to restrict every figure to a readable subset, e.g.
+    python -m experiments.analyze --arms toy_A toy_D toy_D_seen toy_A_replay --out figs/main
 """
 
 from __future__ import annotations
@@ -26,9 +31,32 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 # Fixed arm colours so every figure in the report agrees.
-ARM_COLORS = {"toy_A": "#6b7280", "toy_B": "#2563eb", "toy_C": "#d97706", "toy_D": "#059669"}
-ARM_LABELS = {"toy_A": "A static", "toy_B": "B static (large)",
-              "toy_C": "C oracle growth", "toy_D": "D signal growth"}
+ARM_COLORS = {
+    "toy_A": "#6b7280", "toy_B": "#2563eb", "toy_C": "#d97706", "toy_D": "#059669",
+    "toy_D_fexp": "#a16207", "toy_D_fall": "#7c3aed", "toy_D_femb": "#db2777",
+    "toy_D_seen": "#0891b2", "toy_C_seen": "#0e7490",
+    "toy_A_replay": "#dc2626", "toy_D_replay": "#ea580c",
+    "toy_D_seen_replay": "#65a30d", "toy_D_fall_replay": "#9333ea",
+}
+ARM_LABELS = {
+    "toy_A": "Normal MoE", "toy_B": "Normal MoE, 6 experts",
+    "toy_C": "Grow at true boundary (oracle)", "toy_D": "Grow on detection",
+    "toy_D_fexp": "Grow + freeze old experts", "toy_D_fall": "Grow + freeze all old (1 expert)",
+    "toy_D_femb": "Grow + freeze all but embeddings",
+    "toy_D_seen": "Grow + freeze seen tokens", "toy_C_seen": "Oracle grow + freeze seen tokens",
+    "toy_A_replay": "Normal MoE + 25% replay", "toy_D_replay": "Grow + 25% replay",
+    "toy_D_seen_replay": "Grow + seen freeze + 25% replay",
+    "toy_D_fall_replay": "Grow + freeze all + 25% replay",
+    "toy_C_fall": "Oracle grow + freeze all (1 expert)",
+    "toy_C_fall_k4": "Oracle grow + freeze all (4 experts)",
+    "toy_D_fall_k2": "Grow + freeze all (2 experts)",
+    "toy_D_fall_k4": "Grow + freeze all (4 experts)",
+    "toy_D_fall_k8": "Grow + freeze all (8 experts)",
+}
+ARM_COLORS.update({
+    "toy_C_fall": "#c4b5fd", "toy_C_fall_k4": "#a78bfa",
+    "toy_D_fall_k2": "#6d28d9", "toy_D_fall_k4": "#4c1d95", "toy_D_fall_k8": "#1e1b4b",
+})
 DOMAIN_SHADES = ["#f3f4f6", "#e0f2fe", "#fef3c7", "#ede9fe"]
 _FALLBACK = ["#7c3aed", "#db2777", "#0891b2", "#65a30d", "#ea580c", "#4b5563", "#0d9488", "#9333ea"]
 
@@ -194,7 +222,7 @@ def fig_tradeoff(runs: list[Run], out: Path) -> None:
     groups = _by_arm(runs)
     if not groups:
         return
-    fig, ax = plt.subplots(figsize=(6.4, 4.4))
+    fig, ax = plt.subplots(figsize=(9, 4.4))
     for arm, rs in groups.items():
         doms = rs[0].domains[1:]
         xs = [np.mean([r.summary["phase_end"][d][d] for d in doms]) for r in rs]
@@ -203,11 +231,11 @@ def fig_tradeoff(runs: list[Run], out: Path) -> None:
         ax.errorbar(np.mean(xs), np.mean(ys),
                     xerr=np.std(xs) if len(rs) > 1 else None,
                     yerr=np.std(ys) if len(rs) > 1 else None,
-                    fmt="o", color=c, ms=7, capsize=3)
-        ax.annotate(f"{arm.removeprefix('toy_')} (n={len(rs)})", (np.mean(xs), np.mean(ys)),
-                    textcoords="offset points", xytext=(6, 4), fontsize=8, color=c)
-    ax.set_xlabel("new-domain loss at end of its phase (lower = learned better)")
-    ax.set_ylabel("mean forgetting (lower = remembered better)")
+                    fmt="o", color=c, ms=7, capsize=3,
+                    label=f"{ARM_LABELS.get(arm, arm)} (n={len(rs)})")
+    ax.set_xlabel("loss on each new domain when its phase ends\n(lower = learned it better)")
+    ax.set_ylabel("average forgetting of earlier domains\n(lower = remembered better)")
+    ax.legend(frameon=False, fontsize=7, loc="center left", bbox_to_anchor=(1.01, 0.5))
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
     fig.savefig(out / "tradeoff.png", dpi=160)
@@ -249,18 +277,94 @@ def leak_table(runs: list[Run], out: Path) -> None:
         print(f"  {arm:<16} n={len(rs)}  {cells}")
 
 
+def fig_detection(runs: list[Run], out: Path) -> None:
+    """Top: training loss (mean over seeds) with the jump at each domain change.
+    Bottom: experts per layer; triangles mark growth fired by the detector.
+    Dashed lines are the TRUE boundaries, which the model is never told."""
+    rs = [r for r in runs if r.steps]
+    if not rs:
+        return
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 5), sharex=True,
+                                   gridspec_kw={"height_ratios": [2, 1]})
+    for ax in (ax1, ax2):
+        _domain_bands(ax, rs[0], label=ax is ax1)
+        for b in rs[0].boundaries:
+            ax.axvline(b, color="#374151", ls="--", lw=0.9, zorder=1)
+    curves = defaultdict(list)
+    for r in rs:
+        for st in r.steps:
+            curves[st["step"]].append(st["loss"])
+    xs = sorted(curves)
+    ax1.plot(xs, [np.mean(curves[x]) for x in xs], color="#111827", lw=1.3)
+    ax1.set_ylabel("training loss")
+    for r in rs:
+        xs_e = [st["step"] for st in r.steps]
+        ax2.step(xs_e, [st["experts"] for st in r.steps], where="post",
+                 color=arm_color(r.arm), lw=1.6, alpha=0.8)
+        for e in r.events:
+            ax2.plot(e["step"], e["experts"], "v", color=arm_color(r.arm), ms=7, zorder=5)
+    trig = sorted({e["step"] for r in rs for e in r.events})
+    ax2.set_ylabel("experts / layer")
+    ax2.set_xlabel("training step   (dashed = true domain change; triangles = detector fired: "
+                   + ", ".join(map(str, trig)) + ")", fontsize=8)
+    ax2.yaxis.get_major_locator().set_params(integer=True)
+    for ax in (ax1, ax2):
+        ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out / "detection.png", dpi=160)
+    plt.close(fig)
+
+
+def fig_leak_scatter(runs: list[Run], out: Path) -> None:
+    """One dot per completed run that logged routing: share of FIRST-domain
+    tokens routed to experts born after that domain, vs forgetting of it."""
+    pts: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for r in runs:
+        final = next((e for e in reversed(r.evals) if "route" in e), None)
+        if final is None or not r.complete:
+            continue
+        d0 = r.domains[0]
+        n_old = next(e["experts"] for e in r.evals
+                     if e.get("phase_end") and r.domains[e["domain"]] == d0)
+        leak = float(np.mean([sum(layer[n_old:]) for layer in final["route"][d0]]))
+        pts[r.arm].append((leak, r.summary["forgetting"][d0]))
+    if not pts:
+        return
+    allx = [x for v in pts.values() for x, _ in v]
+    ally = [y for v in pts.values() for _, y in v]
+    corr = np.corrcoef(allx, ally)[0, 1] if len(allx) > 2 else float("nan")
+    fig, ax = plt.subplots(figsize=(6.4, 4.4))
+    for arm, v in sorted(pts.items()):
+        ax.scatter([x for x, _ in v], [y for _, y in v], color=arm_color(arm), s=36,
+                   label=ARM_LABELS.get(arm, arm), zorder=3)
+    ax.set_xlabel(f"share of {runs[0].domains[0]} tokens routed to experts added later")
+    ax.set_ylabel(f"forgetting on {runs[0].domains[0]} (nats)")
+    ax.set_title(f"router leak vs forgetting  (r = {corr:.2f}, {len(allx)} runs)", fontsize=10)
+    ax.legend(frameon=False, fontsize=7, loc="center left", bbox_to_anchor=(1.01, 0.5))
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out / "leak_scatter.png", dpi=160)
+    plt.close(fig)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Make figures from experiment logs.")
     p.add_argument("--results", type=Path, default=Path("results"))
     p.add_argument("--out", type=Path, default=None, help="default: <results>/figures")
     p.add_argument("--fig", nargs="+", default=["all"],
-                   choices=["all", "experts", "heldout", "detection", "tradeoff", "leak"])
+                   choices=["all", "experts", "heldout", "detection", "tradeoff", "leak",
+                            "leakplot", "detectplot"])
+    p.add_argument("--arms", nargs="+", default=None,
+                   help="only include these arms (run-name prefix before _s<seed>)")
     args = p.parse_args()
     out = args.out or args.results / "figures"
     out.mkdir(parents=True, exist_ok=True)
     runs = load_runs(args.results)
+    if args.arms:
+        runs = [r for r in runs if r.arm in set(args.arms)]
     if not runs:
-        raise SystemExit(f"no runs under {args.results}")
+        raise SystemExit(f"no runs under {args.results}"
+                         + (f" matching arms {args.arms}" if args.arms else ""))
     want = set(args.fig)
     every = "all" in want
     if every or "experts" in want:
@@ -273,6 +377,10 @@ def main() -> None:
         fig_tradeoff(runs, out)
     if every or "leak" in want:
         leak_table(runs, out)
+    if every or "leakplot" in want:
+        fig_leak_scatter(runs, out)
+    if every or "detectplot" in want:
+        fig_detection(runs, out)
     partial = [r.name for r in runs if not r.complete]
     print(f"wrote figures to {out}  ({len(runs)} runs"
           + (f", partial: {', '.join(partial)}" if partial else "") + ")")
