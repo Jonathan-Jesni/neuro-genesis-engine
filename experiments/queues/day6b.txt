@@ -1,0 +1,9 @@
+# Day 6b (2026-10-04): at 101M, seen-token freezing got relatively better than at
+# 22M. Does growth + seen-token freeze + 5% replay beat 5% replay alone
+# (big_A_r05: forgetting 0.289, final 3.308)? At 22M it had slightly lower
+# forgetting (0.342 vs 0.373) but a worse final loss (4.312 vs 3.585).
+# ~10 min per run.
+
+big_D_seen_r05  configs/toy_D_fall.yaml  0  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set freeze=all_seen_emb --set replay_frac=0.05 --set confirm_steps=3
+big_D_seen_r05  configs/toy_D_fall.yaml  1  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set freeze=all_seen_emb --set replay_frac=0.05 --set confirm_steps=3
+big_D_seen_r05  configs/toy_D_fall.yaml  2  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set freeze=all_seen_emb --set replay_frac=0.05 --set confirm_steps=3
