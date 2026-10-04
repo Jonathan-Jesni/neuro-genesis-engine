@@ -11,6 +11,7 @@ Figures:
     leak         router leak: share of each OLD domain's tokens routed to experts born later
     leakplot     scatter of router leak vs forgetting on the first domain, one dot per run
     detectplot   training loss + expert count with true boundaries and detector firings
+    budget       forgetting and final loss vs replay budget, per method family
 
 Use --arms to restrict every figure to a readable subset, e.g.
     python -m experiments.analyze --arms toy_A toy_D toy_D_seen toy_A_replay --out figs/main
@@ -277,6 +278,50 @@ def leak_table(runs: list[Run], out: Path) -> None:
         print(f"  {arm:<16} n={len(rs)}  {cells}")
 
 
+BUDGET_FAMILIES = {
+    ("static", "none"): ("Normal MoE", "#6b7280"),
+    ("signal", "none"): ("Grow on detection", "#059669"),
+    ("signal", "all_seen_emb"): ("Grow + freeze seen tokens", "#0891b2"),
+}
+
+
+def fig_budget(runs: list[Run], out: Path) -> None:
+    """Forgetting and final loss vs replay budget, one line per method family.
+    Families are read from each run's config (arm, freeze, replay_frac), so any
+    run of a listed family at any budget lands on the right line."""
+    pts: dict[str, dict[float, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    for r in runs:
+        if not r.complete:
+            continue
+        fam = BUDGET_FAMILIES.get((r.cfg.get("arm"), r.cfg.get("freeze", "none")))
+        if fam is None:
+            continue
+        pts[fam[0]][float(r.cfg.get("replay_frac", 0.0))].append(r.summary)
+    if not pts:
+        return
+    budgets = sorted({b for v in pts.values() for b in v})
+    pos = {b: i for i, b in enumerate(budgets)}
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.8))
+    for name, color in BUDGET_FAMILIES.values():
+        if name not in pts:
+            continue
+        bs = sorted(pts[name])
+        for ax, key in zip(axes, ("forgetting_avg", "final_avg")):
+            m = [np.mean([s[key] for s in pts[name][b]]) for b in bs]
+            sd = [np.std([s[key] for s in pts[name][b]]) for b in bs]
+            ax.errorbar([pos[b] for b in bs], m, yerr=sd, color=color, marker="o",
+                        ms=5, lw=1.8, capsize=3, label=name)
+    for ax, title in zip(axes, ("forgetting of earlier domains", "final average loss (all domains)")):
+        ax.set_xticks(range(len(budgets)), [f"{b:.0%}" for b in budgets])
+        ax.set_xlabel("replay budget (share of each batch from past data)")
+        ax.set_title(title + "  (lower is better)", fontsize=10)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[0].legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out / "budget.png", dpi=160)
+    plt.close(fig)
+
+
 def fig_detection(runs: list[Run], out: Path) -> None:
     """Top: training loss (mean over seeds) with the jump at each domain change.
     Bottom: experts per layer; triangles mark growth fired by the detector.
@@ -353,7 +398,7 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=None, help="default: <results>/figures")
     p.add_argument("--fig", nargs="+", default=["all"],
                    choices=["all", "experts", "heldout", "detection", "tradeoff", "leak",
-                            "leakplot", "detectplot"])
+                            "leakplot", "detectplot", "budget"])
     p.add_argument("--arms", nargs="+", default=None,
                    help="only include these arms (run-name prefix before _s<seed>)")
     args = p.parse_args()
@@ -381,6 +426,8 @@ def main() -> None:
         fig_leak_scatter(runs, out)
     if every or "detectplot" in want:
         fig_detection(runs, out)
+    if every or "budget" in want:
+        fig_budget(runs, out)
     partial = [r.name for r in runs if not r.complete]
     print(f"wrote figures to {out}  ({len(runs)} runs"
           + (f", partial: {', '.join(partial)}" if partial else "") + ")")

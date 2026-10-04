@@ -38,8 +38,9 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
 ## Findings
 
 1. **Task-free shift detection works.** With the 3-consecutive-step rule the
-   loss z-score detector caught 24/24 boundaries across 12 runs, always exactly
-   2 steps late, with zero false triggers (fig 3). Without the rule, 1 of 3
+   loss z-score detector caught 60/60 boundaries across 30 runs (with and
+   without replay), always exactly 2 steps late, with zero false triggers
+   (fig 3). Without the rule, 1 of 3
    seeds fired on a noisy batch (z = 4.04) 8 steps early and its 300-step
    cooldown masked the real boundary.
 2. **Growth alone does not reduce forgetting.** Static (4 or 6 experts),
@@ -74,6 +75,23 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
    vs 1.058; freeze-all 0.958 vs 1.001).
 10. **Bit-exact reproducibility** on the W7900D: `toy_A_repro` (re-run of day-1
     `toy_A_s0` on day 4, new container) reproduced 4.343 / 1.518 exactly.
+11. **Growth has no useful regime at any replay budget** (day 5, fig 5).
+    Forgetting / final avg loss, mean of 3 seeds:
+
+    | Replay | Normal MoE | Grow | Grow + seen-token freeze |
+    |---|---|---|---|
+    | 0% | 1.508 / 4.337 | 1.534 / 4.353 | 1.066 / 4.774 |
+    | 1% | 0.699 / 3.795 | 0.716 / 3.807 | 0.599 / 4.457 |
+    | 5% | 0.373 / 3.585 | 0.381 / 3.593 | 0.342 / 4.312 |
+    | 10% | 0.235 / 3.498 | 0.241 / 3.504 | 0.256 / 4.227 |
+    | 25% | 0.106 / 3.473 | 0.112 / 3.480 | 0.161 / 4.195 |
+
+    Even 1% replay halves forgetting; 5% cuts it by 75%. Growth is within
+    ~0.02 of the normal MoE at every budget, and slightly worse each time.
+    Seen-token freezing lowers forgetting only at ≤5% replay (−0.10 at 1%) and
+    costs so much new-domain learning (new-domain loss ~4.86 vs ~3.77) that its
+    final loss is worse at every budget. Router leak falls with replay for both
+    growth arms (plain growth 22% → 9%, seen-freeze 41% → 30% from 1% to 25%).
 
 ## Figures (`results/figures/`)
 
@@ -85,12 +103,11 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
    detector firings at steps 1222 and 2442 in all 3 seeds.
 4. `4_router_leak.png` — router leak vs stories forgetting, freeze-all runs
    only (the setting where the router is the sole forgetting path).
+5. `5_replay_budget.png` — forgetting and final loss vs replay budget (0, 1,
+   5, 10, 25%) for normal MoE, growth, and growth + seen-token freeze.
 
 ## Open / in progress
 
-- **Replay-budget sweep (day 5, running):** 1%, 5%, 10% replay × {normal MoE,
-  growth, growth + seen-token freeze}. Question: does growth help when the
-  replay budget is small (realistic continual pretraining replays 1–5%)?
 - **Generated vs random experts:** every expert added so far is a freshly
   initialised MLP (the "random expert" condition). The LLM-generated condition
   is not yet run.
