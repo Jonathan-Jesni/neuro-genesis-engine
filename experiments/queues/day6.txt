@@ -1,0 +1,23 @@
+# Day 6 (2026-10-04): scale check. Same stream and settings, ~4.5x larger model
+# (d_model 512, 8 layers, 8 heads, expert width 2048: 101.5M params vs 22.4M).
+# Question: do the headline conclusions (growth ~ normal MoE; replay wins;
+# seen-token freeze trades learning for retention) hold at a larger size?
+# Estimated ~17 min/run on the W7900D. Priority: seed 0 of every arm first.
+
+# --- seed 0 ---
+big_A        configs/toy_A.yaml       0  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048
+big_D        configs/toy_D.yaml       0  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set confirm_steps=3
+big_A_r05    configs/toy_A.yaml       0  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set replay_frac=0.05
+big_D_seen   configs/toy_D_fall.yaml  0  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set freeze=all_seen_emb --set confirm_steps=3
+
+# --- seed 1 ---
+big_A        configs/toy_A.yaml       1  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048
+big_D        configs/toy_D.yaml       1  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set confirm_steps=3
+big_A_r05    configs/toy_A.yaml       1  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set replay_frac=0.05
+big_D_seen   configs/toy_D_fall.yaml  1  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set freeze=all_seen_emb --set confirm_steps=3
+
+# --- seed 2 (next session if time runs out; the queue resumes) ---
+big_A        configs/toy_A.yaml       2  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048
+big_D        configs/toy_D.yaml       2  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set confirm_steps=3
+big_A_r05    configs/toy_A.yaml       2  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set replay_frac=0.05
+big_D_seen   configs/toy_D_fall.yaml  2  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set freeze=all_seen_emb --set confirm_steps=3
