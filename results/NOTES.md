@@ -38,9 +38,9 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
 ## Findings
 
 1. **Task-free shift detection works.** With the 3-consecutive-step rule the
-   loss z-score detector caught 60/60 boundaries across 30 runs (with and
-   without replay), always exactly 2 steps late, with zero false triggers
-   (fig 3). Without the rule, 1 of 3
+   loss z-score detector caught 72/72 boundaries across 36 runs (with and
+   without replay, at 22M and 101M params), always exactly 2 steps late, with
+   zero false triggers (fig 3). Without the rule, 1 of 3
    seeds fired on a noisy batch (z = 4.04) 8 steps early and its 300-step
    cooldown masked the real boundary.
 2. **Growth alone does not reduce forgetting.** Static (4 or 6 experts),
@@ -92,6 +92,22 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
     costs so much new-domain learning (new-domain loss ~4.86 vs ~3.77) that its
     final loss is worse at every budget. Router leak falls with replay for both
     growth arms (plain growth 22% → 9%, seen-freeze 41% → 30% from 1% to 25%).
+12. **The conclusions hold at 4.5× the model size** (day 6, fig 6). Same
+    stream and settings with d_model 512, 8 layers, expert width 2048 (101.5M
+    params vs 22.4M). Forgetting / final avg loss, 3 seeds:
+
+    | Method | 22M | 101M |
+    |---|---|---|
+    | Normal MoE | 1.508 / 4.337 | 1.494 ± 0.030 / 4.110 ± 0.041 |
+    | Grow on detection | 1.534 / 4.353 | 1.536 ± 0.013 / 4.143 ± 0.031 |
+    | Normal MoE + 5% replay | 0.373 / 3.585 | 0.289 ± 0.008 / 3.308 ± 0.015 |
+    | Grow + seen-token freeze | 1.066 / 4.774 | 0.845 ± 0.028 / 4.414 ± 0.024 |
+
+    Growth is again slightly worse than the normal MoE; 5% replay removes 81%
+    of forgetting (75% at 22M). One trend: seen-token freezing gets relatively
+    better with size — 44% less forgetting than the normal MoE (29% at 22M) and
+    a smaller final-loss penalty (+0.30 vs +0.44). With two sizes this is a
+    trend to state carefully, not a scaling law.
 
 ## Figures (`results/figures/`)
 
@@ -105,11 +121,12 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
    only (the setting where the router is the sole forgetting path).
 5. `5_replay_budget.png` — forgetting and final loss vs replay budget (0, 1,
    5, 10, 25%) for normal MoE, growth, and growth + seen-token freeze.
+6. `6_scale.png` — the same four methods at 22M vs 101M params.
 
 ## Open / in progress
 
 - **Generated vs random experts:** every expert added so far is a freshly
   initialised MLP (the "random expert" condition). The LLM-generated condition
   is not yet run.
-- Not started: expert pruning, GPT-2-scale runs, learning-rate re-warm for the
+- Not started: expert pruning, GPT-2 (pretrained, upcycled) runs, learning-rate re-warm for the
   replay baseline.

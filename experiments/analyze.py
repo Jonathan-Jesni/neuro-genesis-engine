@@ -12,6 +12,7 @@ Figures:
     leakplot     scatter of router leak vs forgetting on the first domain, one dot per run
     detectplot   training loss + expert count with true boundaries and detector firings
     budget       forgetting and final loss vs replay budget, per method family
+    scale        same four methods at 22M vs 101M params (toy_ vs big_ arms)
 
 Use --arms to restrict every figure to a readable subset, e.g.
     python -m experiments.analyze --arms toy_A toy_D toy_D_seen toy_A_replay --out figs/main
@@ -322,6 +323,40 @@ def fig_budget(runs: list[Run], out: Path) -> None:
     plt.close(fig)
 
 
+SCALE_ARMS = [("A", "Normal MoE"), ("D", "Grow on\ndetection"),
+              ("A_r05", "Normal MoE\n+ 5% replay"), ("D_seen", "Grow + freeze\nseen tokens")]
+SCALE_SIZES = [("toy", "22M params", "#93c5fd"), ("big", "101M params", "#1d4ed8")]
+
+
+def fig_scale(runs: list[Run], out: Path) -> None:
+    """Forgetting and final loss for the same four methods at two model sizes
+    (arm prefix toy_ = 22M, big_ = 101M), mean +- std over seeds."""
+    by = defaultdict(list)
+    for r in runs:
+        if r.complete:
+            by[r.arm].append(r.summary)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.8))
+    width = 0.38
+    for ax, key, title in zip(axes, ("forgetting_avg", "final_avg"),
+                              ("forgetting of earlier domains", "final average loss")):
+        for j, (prefix, size_label, color) in enumerate(SCALE_SIZES):
+            m, sd = [], []
+            for suffix, _ in SCALE_ARMS:
+                v = [x[key] for x in by.get(f"{prefix}_{suffix}", [])]
+                m.append(np.mean(v) if v else np.nan)
+                sd.append(np.std(v) if len(v) > 1 else 0.0)
+            xs = np.arange(len(SCALE_ARMS)) + (j - 0.5) * width
+            ax.bar(xs, m, width, yerr=sd, color=color, capsize=3, label=size_label)
+        ax.set_xticks(range(len(SCALE_ARMS)), [lab for _, lab in SCALE_ARMS], fontsize=8)
+        ax.set_title(title + "  (lower is better)", fontsize=10)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[1].set_ylim(3.0, None)
+    axes[0].legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out / "scale.png", dpi=160)
+    plt.close(fig)
+
+
 def fig_detection(runs: list[Run], out: Path) -> None:
     """Top: training loss (mean over seeds) with the jump at each domain change.
     Bottom: experts per layer; triangles mark growth fired by the detector.
@@ -398,7 +433,7 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=None, help="default: <results>/figures")
     p.add_argument("--fig", nargs="+", default=["all"],
                    choices=["all", "experts", "heldout", "detection", "tradeoff", "leak",
-                            "leakplot", "detectplot", "budget"])
+                            "leakplot", "detectplot", "budget", "scale"])
     p.add_argument("--arms", nargs="+", default=None,
                    help="only include these arms (run-name prefix before _s<seed>)")
     args = p.parse_args()
@@ -428,6 +463,8 @@ def main() -> None:
         fig_detection(runs, out)
     if every or "budget" in want:
         fig_budget(runs, out)
+    if every or "scale" in want:
+        fig_scale(runs, out)
     partial = [r.name for r in runs if not r.complete]
     print(f"wrote figures to {out}  ({len(runs)} runs"
           + (f", partial: {', '.join(partial)}" if partial else "") + ")")
