@@ -119,13 +119,18 @@ class MoELayer(nn.Module):
             }
         return out.reshape(shape), g.aux_loss
 
-    def grow(self, optimizer: Optional[torch.optim.Optimizer], tag: str) -> int:
-        """Register one new expert through the foundry. Returns its index."""
+    def grow(self, optimizer: Optional[torch.optim.Optimizer], tag: str,
+             source: Optional[str] = None) -> int:
+        """Register one new expert through the foundry. Returns its index.
+
+        ``source`` overrides the default template MLP (e.g. an LLM-generated
+        design); it goes through the same foundry validation either way.
+        """
         self._grown += 1
-        name = f"GrownExpertL{self.layer_idx}N{self._grown}{tag}"
-        reg = self.foundry.register_expert_from_source(
-            expert_source(self.cfg.d_model, self.cfg.d_ff, name), optimizer=optimizer
-        )
+        if source is None:
+            name = f"GrownExpertL{self.layer_idx}N{self._grown}{tag}"
+            source = expert_source(self.cfg.d_model, self.cfg.d_ff, name)
+        reg = self.foundry.register_expert_from_source(source, optimizer=optimizer)
         return reg.index
 
 
@@ -196,14 +201,15 @@ class MoEGPT(nn.Module):
             loss = F.cross_entropy(logits.float().view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss, aux_total
 
-    def grow(self, optimizer: Optional[torch.optim.Optimizer], tag: str = "") -> None:
+    def grow(self, optimizer: Optional[torch.optim.Optimizer], tag: str = "",
+             source: Optional[str] = None) -> None:
         """Add one expert to every MoE layer (transactional per layer).
 
         Must NOT be called while any gate's ``expand_lock`` is held (the foundry
         re-acquires it). Call between train steps only.
         """
         for layer in self.moe_layers:
-            layer.grow(optimizer, tag)
+            layer.grow(optimizer, tag, source)
 
     def routing_stats(self) -> list[dict]:
         return [layer.last_stats for layer in self.moe_layers]

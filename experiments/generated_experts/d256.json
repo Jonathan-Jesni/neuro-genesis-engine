@@ -1,0 +1,56 @@
+{
+  "model": "google/gemma-2-2b-it",
+  "dim": 256,
+  "temperature": 0.7,
+  "total_tries": 14,
+  "designs": [
+    {
+      "source": "class FeedForwardBlock(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.LayerNorm(256),\n            nn.Linear(256, 128),\n            nn.ReLU(),\n            nn.Linear(128, 256)\n        )\n    def forward(self, x):\n        return self.net(x)",
+      "class_name": "FeedForwardBlock",
+      "params": 66432,
+      "attempts": 1
+    },
+    {
+      "source": "class FeedForwardBlock(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.layer1 = nn.Linear(256, 128)\n        self.layer2 = nn.Linear(128, 256)\n        self.layernorm = nn.LayerNorm(256)\n    def forward(self, x):\n        x = self.layer1(x)\n        x = torch.relu(x)\n        x = self.layer2(x)\n        x = self.layernorm(x)\n        return x",
+      "class_name": "FeedForwardBlock",
+      "params": 66432,
+      "attempts": 1
+    },
+    {
+      "source": "class FeedForwardBlock(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.norm = nn.LayerNorm(256)\n        self.linear1 = nn.Linear(256, 128)\n        self.linear2 = nn.Linear(128, 256)\n    def forward(self, x):\n        x = self.norm(x)\n        x = self.linear1(x)\n        x = self.linear2(x)\n        return x",
+      "class_name": "FeedForwardBlock",
+      "params": 66432,
+      "attempts": 1
+    },
+    {
+      "source": "class FeedForwardBlock(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.layer1 = nn.LayerNorm(256)\n        self.linear1 = nn.Linear(256, 128)\n        self.linear2 = nn.Linear(128, 256)\n    def forward(self, x):\n        x = self.layer1(x)\n        x = self.linear1(x)\n        x = self.linear2(x)\n        return x",
+      "class_name": "FeedForwardBlock",
+      "params": 66432,
+      "attempts": 1
+    },
+    {
+      "source": "class FeedForwardBlock(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.LayerNorm(256),\n            nn.Linear(256, 128),\n            nn.ReLU(),\n            nn.Linear(128, 256),\n        )\n    def forward(self, x):\n        return self.net(x)",
+      "class_name": "FeedForwardBlock",
+      "params": 66432,
+      "attempts": 1
+    },
+    {
+      "source": "class FeedForward(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.norm = nn.LayerNorm(256)\n        self.linear1 = nn.Linear(256, 128)\n        self.linear2 = nn.Linear(128, 256)\n    def forward(self, x):\n        x = self.norm(x)\n        x = self.linear1(x)\n        x = torch.relu(x)\n        x = self.linear2(x)\n        return x",
+      "class_name": "FeedForward",
+      "params": 66432,
+      "attempts": 1
+    },
+    {
+      "source": "class FeedForwardBlock(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.LayerNorm(256),\n            nn.Linear(256, 256),\n            nn.ReLU(),\n            nn.Linear(256, 256)\n        )\n    def forward(self, x):\n        return self.net(x)",
+      "class_name": "FeedForwardBlock",
+      "params": 132096,
+      "attempts": 1
+    },
+    {
+      "source": "class FeedForwardBlock(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.norm = nn.LayerNorm(256)\n        self.linear1 = nn.Linear(256, 128)\n        self.linear2 = nn.Linear(128, 256)\n    def forward(self, x):\n        x = self.norm(x)\n        x = self.linear1(x)\n        x = torch.relu(x)\n        x = self.linear2(x)\n        return x",
+      "class_name": "FeedForwardBlock",
+      "params": 66432,
+      "attempts": 1
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+# Day 7b (2026-10-05): generated vs random experts — the comparison promised to
+# the supervisor. All arms: 22M model, growth on detection (confirm_steps=3).
+# Only the source of each NEW expert differs:
+#   toy_D_tmpl     random-init template MLP, hidden 1024 (526k params) — default so far
+#   toy_D_gen      Gemma-2-2b-it design from experiments/generated_experts/d256.json.
+#                  Gemma consistently writes LayerNorm -> 256->128 -> act -> 128->256
+#                  (~66k params), i.e. ~8x smaller than the template, so:
+#   toy_D_tmpl128  random-init template with hidden 128 (66k params) = size-matched
+#                  control. gen vs tmpl128 isolates "LLM design vs random design";
+#                  tmpl128 vs tmpl isolates expert size.
+# Second block: the same three under seen-token freezing, where new experts carry
+# all new-domain learning, so their design should matter most (toy_D_seen from
+# day 4 is the full-size template arm there).
+# ~4.3 min per run, 15 runs.
+
+toy_D_tmpl          configs/toy_D.yaml       0  --set confirm_steps=3
+toy_D_gen           configs/toy_D.yaml       0  --set confirm_steps=3 --set expert_source=generated
+toy_D_tmpl128       configs/toy_D.yaml       0  --set confirm_steps=3 --set grow_d_ff=128
+toy_D_tmpl          configs/toy_D.yaml       1  --set confirm_steps=3
+toy_D_gen           configs/toy_D.yaml       1  --set confirm_steps=3 --set expert_source=generated
+toy_D_tmpl128       configs/toy_D.yaml       1  --set confirm_steps=3 --set grow_d_ff=128
+toy_D_tmpl          configs/toy_D.yaml       2  --set confirm_steps=3
+toy_D_gen           configs/toy_D.yaml       2  --set confirm_steps=3 --set expert_source=generated
+toy_D_tmpl128       configs/toy_D.yaml       2  --set confirm_steps=3 --set grow_d_ff=128
+
+toy_D_seen_gen      configs/toy_D_fall.yaml  0  --set freeze=all_seen_emb --set confirm_steps=3 --set expert_source=generated
+toy_D_seen_tmpl128  configs/toy_D_fall.yaml  0  --set freeze=all_seen_emb --set confirm_steps=3 --set grow_d_ff=128
+toy_D_seen_gen      configs/toy_D_fall.yaml  1  --set freeze=all_seen_emb --set confirm_steps=3 --set expert_source=generated
+toy_D_seen_tmpl128  configs/toy_D_fall.yaml  1  --set freeze=all_seen_emb --set confirm_steps=3 --set grow_d_ff=128
+toy_D_seen_gen      configs/toy_D_fall.yaml  2  --set freeze=all_seen_emb --set confirm_steps=3 --set expert_source=generated
+toy_D_seen_tmpl128  configs/toy_D_fall.yaml  2  --set freeze=all_seen_emb --set confirm_steps=3 --set grow_d_ff=128
