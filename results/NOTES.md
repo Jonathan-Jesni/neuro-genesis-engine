@@ -108,6 +108,40 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
     better with size — 44% less forgetting than the normal MoE (29% at 22M) and
     a smaller final-loss penalty (+0.30 vs +0.44). With two sizes this is a
     trend to state carefully, not a scaling law.
+13. **No growth combination beats plain replay at 101M either** (days 6b–7).
+    Forgetting / final avg loss, 3 seeds:
+
+    | Replay | Normal MoE | Grow + seen-token freeze |
+    |---|---|---|
+    | 1% | 0.605 ± 0.014 / 3.512 ± 0.031 | 0.432 ± 0.032 / 4.147 ± 0.019 |
+    | 5% | 0.289 ± 0.008 / 3.308 ± 0.015 | 0.230 ± 0.014 / 4.019 ± 0.036 |
+
+    Seen-token freezing still lowers forgetting on top of replay (−29% at 1%,
+    −20% at 5%; at 22M it was −14% / −8%, so the retention gain grows with
+    size), but its final loss is ~0.65–0.7 worse at both budgets: with replay
+    already protecting old domains, freezing mostly costs new learning.
+14. **LLM-generated experts perform the same as random ones of the same size**
+    (day 7, fig 7). Gemma-2-2b-it, given the foundry contract and the real
+    failure context, wrote 8 designs in 14 tries (all valid on the first
+    attempt) — but almost all the same block: LayerNorm → Linear 256→128 →
+    activation → Linear 128→256 (~66k params; one design used width 256).
+    That is ~8× smaller than the 526k-param template, so a size-matched
+    random-init template (hidden 128) is the control. Growth on detection,
+    22M model, forgetting / final avg loss, 3 seeds:
+
+    | New expert | No freezing | Seen-token freezing |
+    |---|---|---|
+    | Random init, full size (526k) | 1.529 ± 0.021 / 4.350 ± 0.018 | 1.066 ± 0.072 / 4.774 ± 0.087 |
+    | Gemma-written (~66k) | 1.554 ± 0.022 / 4.379 ± 0.016 | 1.074 ± 0.075 / 4.941 ± 0.048 |
+    | Random init, same size (66k) | 1.596 ± 0.034 / 4.404 ± 0.028 | 1.062 ± 0.087 / 4.924 ± 0.068 |
+
+    Gemma vs same-size random: slightly better without freezing (~1 std),
+    slightly worse with it — opposite directions, within seed noise, so no
+    detectable effect of LLM design. Expert *size* matters more: under
+    seen-token freezing, where new experts carry all new-domain learning, the
+    full-size template learns new domains clearly better (new-domain loss 4.86
+    vs ~5.10). Seeds 3–5 of the no-freeze trio ran on day 7c (results pending
+    download) to firm up the closest call.
 
 ## Figures (`results/figures/`)
 
@@ -122,11 +156,13 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
 5. `5_replay_budget.png` — forgetting and final loss vs replay budget (0, 1,
    5, 10, 25%) for normal MoE, growth, and growth + seen-token freeze.
 6. `6_scale.png` — the same four methods at 22M vs 101M params.
+7. `7_expert_source.png` — Gemma-written vs random-init new experts (full
+   size and size-matched), without and with seen-token freezing.
 
 ## Open / in progress
 
-- **Generated vs random experts:** every expert added so far is a freshly
-  initialised MLP (the "random expert" condition). The LLM-generated condition
-  is not yet run.
+- **Day 7c** (seeds 3–5 of the no-freeze generated / size-matched / full
+  template arms) finished on the cloud box; download and update finding 14
+  and fig 7 to n = 6.
 - Not started: expert pruning, GPT-2 (pretrained, upcycled) runs, learning-rate re-warm for the
   replay baseline.

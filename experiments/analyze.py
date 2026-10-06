@@ -13,6 +13,7 @@ Figures:
     detectplot   training loss + expert count with true boundaries and detector firings
     budget       forgetting and final loss vs replay budget, per method family
     scale        same four methods at 22M vs 101M params (toy_ vs big_ arms)
+    source       generated (Gemma) vs random-init new experts, size-matched control
 
 Use --arms to restrict every figure to a readable subset, e.g.
     python -m experiments.analyze --arms toy_A toy_D toy_D_seen toy_A_replay --out figs/main
@@ -328,6 +329,48 @@ SCALE_ARMS = [("A", "Normal MoE"), ("D", "Grow on\ndetection"),
 SCALE_SIZES = [("toy", "22M params", "#93c5fd"), ("big", "101M params", "#1d4ed8")]
 
 
+SOURCE_ARMS = [("tmpl", "Random init,\nfull size (526k)", "#9ca3af"),
+               ("gen", "Gemma-written\n(~66k)", "#7c3aed"),
+               ("tmpl128", "Random init,\nsame size (66k)", "#c4b5fd")]
+SOURCE_SETTINGS = [("toy_D_{}", "no freezing"), ("toy_D_seen_{}", "seen-token freezing")]
+SOURCE_FALLBACK = {"toy_D_seen_tmpl": "toy_D_seen"}   # day-4 arm = full-size template
+
+
+def fig_source(runs: list[Run], out: Path) -> None:
+    """Generated vs random-init new experts: forgetting and final loss, for two
+    settings, mean +- std over seeds (n printed on each bar)."""
+    by = defaultdict(list)
+    for r in runs:
+        if r.complete:
+            by[r.arm].append(r.summary)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.9))
+    width = 0.26
+    for ax, key, title in zip(axes, ("forgetting_avg", "final_avg"),
+                              ("forgetting of earlier domains", "final average loss")):
+        for j, (suffix, label, color) in enumerate(SOURCE_ARMS):
+            m, sd, ns = [], [], []
+            for pattern, _ in SOURCE_SETTINGS:
+                arm = pattern.format(suffix)
+                v = [x[key] for x in by.get(arm, by.get(SOURCE_FALLBACK.get(arm, ""), []))]
+                m.append(np.mean(v) if v else np.nan)
+                sd.append(np.std(v) if len(v) > 1 else 0.0)
+                ns.append(len(v))
+            xs = np.arange(len(SOURCE_SETTINGS)) + (j - 1) * width
+            bars = ax.bar(xs, m, width, yerr=sd, color=color, capsize=3, label=label)
+            for b, n in zip(bars, ns):
+                ax.text(b.get_x() + b.get_width() / 2, 0.02, f"n={n}", ha="center",
+                        va="bottom", fontsize=7, transform=ax.get_xaxis_transform())
+        ax.set_xticks(range(len(SOURCE_SETTINGS)), [lab for _, lab in SOURCE_SETTINGS])
+        ax.set_title(title + "  (lower is better)", fontsize=10)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[1].set_ylim(4.0, None)
+    axes[1].legend(frameon=False, fontsize=8, loc="upper left")
+    fig.suptitle("Where the new expert comes from (growth on detection, 22M model)", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out / "expert_source.png", dpi=160)
+    plt.close(fig)
+
+
 def fig_scale(runs: list[Run], out: Path) -> None:
     """Forgetting and final loss for the same four methods at two model sizes
     (arm prefix toy_ = 22M, big_ = 101M), mean +- std over seeds."""
@@ -433,7 +476,7 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=None, help="default: <results>/figures")
     p.add_argument("--fig", nargs="+", default=["all"],
                    choices=["all", "experts", "heldout", "detection", "tradeoff", "leak",
-                            "leakplot", "detectplot", "budget", "scale"])
+                            "leakplot", "detectplot", "budget", "scale", "source"])
     p.add_argument("--arms", nargs="+", default=None,
                    help="only include these arms (run-name prefix before _s<seed>)")
     args = p.parse_args()
@@ -465,6 +508,8 @@ def main() -> None:
         fig_budget(runs, out)
     if every or "scale" in want:
         fig_scale(runs, out)
+    if every or "source" in want:
+        fig_source(runs, out)
     partial = [r.name for r in runs if not r.complete]
     print(f"wrote figures to {out}  ({len(runs)} runs"
           + (f", partial: {', '.join(partial)}" if partial else "") + ")")
