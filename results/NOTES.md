@@ -127,21 +127,25 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
     activation → Linear 128→256 (~66k params; one design used width 256).
     That is ~8× smaller than the 526k-param template, so a size-matched
     random-init template (hidden 128) is the control. Growth on detection,
-    22M model, forgetting / final avg loss, 3 seeds:
+    22M model, forgetting / final avg loss (no freezing: 6 seeds, days 7 + 7c;
+    seen-token freezing: 3 seeds):
 
-    | New expert | No freezing | Seen-token freezing |
+    | New expert | No freezing (n = 6) | Seen-token freezing (n = 3) |
     |---|---|---|
-    | Random init, full size (526k) | 1.529 ± 0.021 / 4.350 ± 0.018 | 1.066 ± 0.072 / 4.774 ± 0.087 |
-    | Gemma-written (~66k) | 1.554 ± 0.022 / 4.379 ± 0.016 | 1.074 ± 0.075 / 4.941 ± 0.048 |
-    | Random init, same size (66k) | 1.596 ± 0.034 / 4.404 ± 0.028 | 1.062 ± 0.087 / 4.924 ± 0.068 |
+    | Random init, full size (526k) | 1.532 ± 0.018 / 4.351 ± 0.013 | 1.066 ± 0.072 / 4.774 ± 0.087 |
+    | Gemma-written (~66k) | 1.557 ± 0.017 / 4.377 ± 0.015 | 1.074 ± 0.075 / 4.941 ± 0.048 |
+    | Random init, same size (66k) | 1.576 ± 0.034 / 4.389 ± 0.024 | 1.062 ± 0.087 / 4.924 ± 0.068 |
 
-    Gemma vs same-size random: slightly better without freezing (~1 std),
-    slightly worse with it — opposite directions, within seed noise, so no
-    detectable effect of LLM design. Expert *size* matters more: under
-    seen-token freezing, where new experts carry all new-domain learning, the
-    full-size template learns new domains clearly better (new-domain loss 4.86
-    vs ~5.10). Seeds 3–5 of the no-freeze trio ran on day 7c (results pending
-    download) to firm up the closest call.
+    Welch t-tests over the 6 no-freeze seeds: **Gemma vs same-size random is
+    not significant** (forgetting −0.019, p = 0.27; final −0.013, p = 0.30) —
+    and the gap shrank from 3 to 6 seeds, consistent with no effect. With
+    seen-token freezing the sign flips (Gemma slightly worse). **Expert size is
+    significant**: full-size vs same-size template, forgetting −0.044
+    (p = 0.024), final −0.038 (p = 0.010); under seen-token freezing, where new
+    experts carry all new-domain learning, the full-size template learns new
+    domains clearly better (new-domain loss 4.86 vs ~5.10). Answer to the
+    original question: LLM-written experts are no better than random ones of
+    the same size; what matters is how much capacity is added.
 
 ## Figures (`results/figures/`)
 
@@ -161,8 +165,7 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
 
 ## Open / in progress
 
-- **Day 7c** (seeds 3–5 of the no-freeze generated / size-matched / full
-  template arms) finished on the cloud box; download and update finding 14
-  and fig 7 to n = 6.
+- **Day 8 (running): detection sensitivity** — stories → stories + q% code
+  (q = 5, 10, 25, 50) and a no-shift control, 3 seeds each.
 - Not started: expert pruning, GPT-2 (pretrained, upcycled) runs, learning-rate re-warm for the
   replay baseline.
