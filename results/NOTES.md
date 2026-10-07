@@ -38,9 +38,10 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
 ## Findings
 
 1. **Task-free shift detection works.** With the 3-consecutive-step rule the
-   loss z-score detector caught 72/72 boundaries across 36 runs (with and
-   without replay, at 22M and 101M params), always exactly 2 steps late, with
-   zero false triggers (fig 3). Without the rule, 1 of 3
+   loss z-score detector caught 132/132 boundaries across all 66 three-domain
+   runs that used it (with and without freezing and replay, random or
+   Gemma-written experts, 22M and 101M params), always exactly 2 steps late,
+   with zero false triggers (fig 3). Without the rule, 1 of 3
    seeds fired on a noisy batch (z = 4.04) 8 steps early and its 300-step
    cooldown masked the real boundary.
 2. **Growth alone does not reduce forgetting.** Static (4 or 6 experts),

@@ -1,0 +1,13 @@
+# Day 7c (2026-10-06): seeds 3-5 for the no-freeze generated-vs-random trio, so
+# the closest call in the project (Gemma vs same-size random) has n = 6.
+# (Created on the cloud box during the session; committed afterwards.)
+
+toy_D_gen      configs/toy_D.yaml  3  --set confirm_steps=3 --set expert_source=generated
+toy_D_tmpl128  configs/toy_D.yaml  3  --set confirm_steps=3 --set grow_d_ff=128
+toy_D_tmpl     configs/toy_D.yaml  3  --set confirm_steps=3
+toy_D_gen      configs/toy_D.yaml  4  --set confirm_steps=3 --set expert_source=generated
+toy_D_tmpl128  configs/toy_D.yaml  4  --set confirm_steps=3 --set grow_d_ff=128
+toy_D_tmpl     configs/toy_D.yaml  4  --set confirm_steps=3
+toy_D_gen      configs/toy_D.yaml  5  --set confirm_steps=3 --set expert_source=generated
+toy_D_tmpl128  configs/toy_D.yaml  5  --set confirm_steps=3 --set grow_d_ff=128
+toy_D_tmpl     configs/toy_D.yaml  5  --set confirm_steps=3

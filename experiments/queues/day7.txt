@@ -1,0 +1,10 @@
+# Day 7 (2026-10-05): 1% replay at 101M — the budget where seen-token freezing
+# helped most at 22M. (Created on the cloud box during the session; committed
+# afterwards so every result in results/NOTES.md has its queue in the repo.)
+
+big_A_r01       configs/toy_A.yaml       0  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set replay_frac=0.01
+big_D_seen_r01  configs/toy_D_fall.yaml  0  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set freeze=all_seen_emb --set replay_frac=0.01 --set confirm_steps=3
+big_A_r01       configs/toy_A.yaml       1  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set replay_frac=0.01
+big_D_seen_r01  configs/toy_D_fall.yaml  1  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set freeze=all_seen_emb --set replay_frac=0.01 --set confirm_steps=3
+big_A_r01       configs/toy_A.yaml       2  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set replay_frac=0.01
+big_D_seen_r01  configs/toy_D_fall.yaml  2  --set model.d_model=512 --set model.n_layer=8 --set model.n_head=8 --set model.d_ff=2048 --set freeze=all_seen_emb --set replay_frac=0.01 --set confirm_steps=3
