@@ -14,6 +14,7 @@ Figures:
     budget       forgetting and final loss vs replay budget, per method family
     scale        same four methods at 22M vs 101M params (toy_ vs big_ arms)
     source       generated (Gemma) vs random-init new experts, size-matched control
+    sensitivity  detection vs shift size for two-phase mixture runs (day 8)
 
 Use --arms to restrict every figure to a readable subset, e.g.
     python -m experiments.analyze --arms toy_A toy_D toy_D_seen toy_A_replay --out figs/main
@@ -371,6 +372,62 @@ def fig_source(runs: list[Run], out: Path) -> None:
     plt.close(fig)
 
 
+def _shift_share(r: Run) -> float:
+    """Share of phase 2 that is NOT the phase-1 domain (0 for a no-shift run)."""
+    from experiments.data import parse_phase
+    first = parse_phase(r.domains[0])[0][0]
+    return sum(w for name, w in parse_phase(r.domains[1]) if name != first)
+
+
+def fig_sensitivity(runs: list[Run], out: Path) -> None:
+    """Detection vs shift size for two-phase mixture runs (stories -> stories +
+    q% code). Left: training-loss jump at the switch, one dot per seed, filled
+    if the detector fired. Right: detection delay in steps (misses at top)."""
+    rs = [r for r in runs if r.complete and len(r.domains) == 2 and r.steps]
+    if not rs:
+        return
+    b = rs[0].boundaries[0]
+    rows = []
+    for r in rs:
+        pre = [x["loss"] for x in r.steps if b - 100 <= x["step"] < b]
+        post = [x["loss"] for x in r.steps if b <= x["step"] < b + 100]
+        trig = [e["step"] for e in r.events if e["reason"] == "loss_spike"]
+        hit = next((t for t in trig if b <= t < b + 300), None)
+        rows.append((_shift_share(r), np.mean(post) - np.mean(pre), hit - b if hit else None,
+                     len([t for t in trig if t != hit])))
+    qs = sorted({q for q, *_ in rows})
+    pos = {q: i for i, q in enumerate(qs)}
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3.8))
+    for q, jump, lat, _ in rows:
+        jitter = (hash((q, jump)) % 7 - 3) * 0.04
+        if q == 0:   # no shift: staying silent is the correct outcome
+            ax1.scatter(pos[q] + jitter, jump, s=46, zorder=3, color="#9ca3af")
+            continue
+        face = "#059669" if lat is not None else "white"
+        edge = "#059669" if lat is not None else "#dc2626"
+        ax1.scatter(pos[q] + jitter, jump, s=46, zorder=3, color=face,
+                    edgecolors=edge, linewidths=1.6)
+        ax2.scatter(pos[q] + jitter, lat if lat is not None else 13, s=46, zorder=3,
+                    color=face, edgecolors=edge, linewidths=1.6)
+    for ax in (ax1, ax2):
+        ax.set_xticks(range(len(qs)), [f"{q:.0%}" for q in qs])
+        ax.set_xlabel("share of new-domain (code) data after the switch")
+        ax.spines[["top", "right"]].set_visible(False)
+    ax1.axhline(0, color="#9ca3af", lw=0.8)
+    ax1.set_ylabel("training-loss jump at the switch (nats)")
+    ax1.set_title("green = detected, hollow red = missed, gray = no shift (correctly silent)",
+                  fontsize=9)
+    ax2.set_ylabel("steps from switch to detection")
+    ax2.set_ylim(0, 14)
+    ax2.axhline(12.5, color="#dc2626", lw=0.6, ls=":")
+    ax2.text(len(qs) - 0.5, 13.3, "missed", color="#dc2626", fontsize=8, ha="right")
+    n_false = sum(f for *_, f in rows)
+    ax2.set_title(f"false triggers across all {len(rows)} runs: {n_false}", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out / "sensitivity.png", dpi=160)
+    plt.close(fig)
+
+
 def fig_scale(runs: list[Run], out: Path) -> None:
     """Forgetting and final loss for the same four methods at two model sizes
     (arm prefix toy_ = 22M, big_ = 101M), mean +- std over seeds."""
@@ -476,7 +533,8 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=None, help="default: <results>/figures")
     p.add_argument("--fig", nargs="+", default=["all"],
                    choices=["all", "experts", "heldout", "detection", "tradeoff", "leak",
-                            "leakplot", "detectplot", "budget", "scale", "source"])
+                            "leakplot", "detectplot", "budget", "scale", "source",
+                            "sensitivity"])
     p.add_argument("--arms", nargs="+", default=None,
                    help="only include these arms (run-name prefix before _s<seed>)")
     args = p.parse_args()
@@ -510,6 +568,8 @@ def main() -> None:
         fig_scale(runs, out)
     if every or "source" in want:
         fig_source(runs, out)
+    if every or "sensitivity" in want:
+        fig_sensitivity(runs, out)
     partial = [r.name for r in runs if not r.complete]
     print(f"wrote figures to {out}  ({len(runs)} runs"
           + (f", partial: {', '.join(partial)}" if partial else "") + ")")

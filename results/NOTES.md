@@ -146,6 +146,28 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
     domains clearly better (new-domain loss 4.86 vs ~5.10). Answer to the
     original question: LLM-written experts are no better than random ones of
     the same size; what matters is how much capacity is added.
+15. **Detection sensitivity: reliable from a 10% shift, borderline at 5%,
+    zero false triggers** (day 8, fig 8). Two-phase runs: pure stories, then
+    stories with a share q of code mixed in (or pure stories again as a
+    no-shift control); 3 seeds each, same detector (z > 4 for 3 consecutive
+    steps). Switch at step 1220:
+
+    | q (code share) | Training-loss jump | Detected | Detection delay (steps) |
+    |---|---|---|---|
+    | 0% (no shift) | −0.05 | 0/3 (correct) | — |
+    | 5% | +0.10 | 1/3 | 10 |
+    | 10% | +0.23 | 3/3 | 3, 5, 10 |
+    | 25% | +0.59 | 3/3 | 2, 2, 5 |
+    | 50% | +1.15 | 3/3 | 2, 2, 2 |
+
+    The loss jump is close to linear in q, and the z-score at firing drops
+    with it (4.1–10 at 10%, 16 at 25%, 22–38 at 50%), so the miss at 5% is
+    simply the jump (~0.1 nats, ~4% of the loss) sitting at the z = 4
+    threshold. No trigger fired anywhere except just after a real switch
+    (0 false triggers in 15 runs × 2440 steps). Together with finding 1: the
+    detector is reliable for shifts that move the loss by ≳0.2 nats; smaller
+    or gradual drift would need a lower threshold or a slower, averaged
+    signal (not tested).
 
 ## Figures (`results/figures/`)
 
@@ -162,10 +184,12 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
 6. `6_scale.png` — the same four methods at 22M vs 101M params.
 7. `7_expert_source.png` — Gemma-written vs random-init new experts (full
    size and size-matched), without and with seen-token freezing.
+8. `8_detection_sensitivity.png` — loss jump and detection delay vs shift
+   size (0–50% code), one dot per seed.
 
 ## Open / in progress
 
-- **Day 8 (running): detection sensitivity** — stories → stories + q% code
-  (q = 5, 10, 25, 50) and a no-shift control, 3 seeds each.
+- Experiments complete; remaining work is the write-up.
+- Not tested: gradual drift (shift ramps in slowly rather than switching).
 - Not started: expert pruning, GPT-2 (pretrained, upcycled) runs, learning-rate re-warm for the
   replay baseline.
