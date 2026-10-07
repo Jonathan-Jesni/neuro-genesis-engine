@@ -35,7 +35,7 @@ import yaml
 from torch import Tensor
 
 from core.orchestrator import RollingSpikeDetector
-from experiments.data import DomainStream, HeldOut
+from experiments.data import DomainStream, HeldOut, base_domains
 from experiments.model import ModelConfig, MoEGPT, count_params, expert_source
 
 DEFAULTS: dict[str, Any] = {
@@ -291,7 +291,7 @@ def run(cfg: dict, seed: int) -> dict:
     steps_per_phase = max(1, cfg["tokens_per_phase"] // tokens_per_step)
     stream = DomainStream(Path(cfg["data_dir"]), cfg["domains"], steps_per_phase,
                           cfg["batch_size"], mcfg.seq_len, seed)
-    heldout = HeldOut(Path(cfg["data_dir"]), cfg["domains"], cfg["eval_batches"],
+    heldout = HeldOut(Path(cfg["data_dir"]), base_domains(cfg["domains"]), cfg["eval_batches"],
                       cfg["batch_size"], mcfg.seq_len)
     total = stream.total_steps
     boundaries = set(stream.boundaries())
@@ -442,7 +442,9 @@ def run(cfg: dict, seed: int) -> dict:
                   + f"  {rate/1e3:.0f}k tok/s", flush=True)
 
     final = phase_end[cfg["domains"][-1]]
-    forgetting = {d: final[d] - phase_end[d][d] for d in cfg["domains"][:-1]}
+    # Mixture phases have no single held-out set of their own: forgetting is
+    # reported only for pure-domain phases (all of them in non-mixture runs).
+    forgetting = {d: final[d] - phase_end[d][d] for d in cfg["domains"][:-1] if d in final}
     summary = {
         "run": run_name, "arm": arm, "seed": seed, "freeze": cfg["freeze"],
         "replay_frac": cfg["replay_frac"],

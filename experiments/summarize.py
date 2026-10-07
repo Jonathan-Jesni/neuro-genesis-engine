@@ -37,7 +37,8 @@ def main() -> None:
             name, str(len(runs)),
             _ms([r["final_avg"] for r in runs]),
             _ms([r["forgetting_avg"] for r in runs]),
-            *[_ms([r["forgetting"][d] for r in runs]) for d in domains[:-1]],
+            *[_ms([r["forgetting"][d] for r in runs if d in r["forgetting"]] or [float("nan")])
+              for d in domains[:-1]],
             _ms([float(r["experts_final"]) for r in runs]),
         ])
     widths = [max(len(str(x)) for x in col) for col in zip(head, *rows)]

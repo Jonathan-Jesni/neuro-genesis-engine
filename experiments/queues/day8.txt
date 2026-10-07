@@ -1,0 +1,24 @@
+# Day 8 (2026-10-07): detection sensitivity. Every boundary so far was a huge
+# shift (stories -> code, z ~ 100). Here phase 1 is pure stories and phase 2 is
+# stories with a slice q of code mixed in, q = 5 / 10 / 25 / 50%; plus a
+# no-shift control (stories -> stories) for false triggers over 2440 steps.
+# Growth on detection, confirm_steps=3, no freeze/replay; 2 phases (~3 min/run).
+# Question: what is the smallest shift the loss detector catches, and how late?
+
+shift_q05  configs/toy_D.yaml  0  --set confirm_steps=3 --set domains=[stories,stories:0.95+code:0.05]
+shift_q10  configs/toy_D.yaml  0  --set confirm_steps=3 --set domains=[stories,stories:0.90+code:0.10]
+shift_q25  configs/toy_D.yaml  0  --set confirm_steps=3 --set domains=[stories,stories:0.75+code:0.25]
+shift_q50  configs/toy_D.yaml  0  --set confirm_steps=3 --set domains=[stories,stories:0.50+code:0.50]
+shift_none configs/toy_D.yaml  0  --set confirm_steps=3 --set domains=[stories,stories]
+
+shift_q05  configs/toy_D.yaml  1  --set confirm_steps=3 --set domains=[stories,stories:0.95+code:0.05]
+shift_q10  configs/toy_D.yaml  1  --set confirm_steps=3 --set domains=[stories,stories:0.90+code:0.10]
+shift_q25  configs/toy_D.yaml  1  --set confirm_steps=3 --set domains=[stories,stories:0.75+code:0.25]
+shift_q50  configs/toy_D.yaml  1  --set confirm_steps=3 --set domains=[stories,stories:0.50+code:0.50]
+shift_none configs/toy_D.yaml  1  --set confirm_steps=3 --set domains=[stories,stories]
+
+shift_q05  configs/toy_D.yaml  2  --set confirm_steps=3 --set domains=[stories,stories:0.95+code:0.05]
+shift_q10  configs/toy_D.yaml  2  --set confirm_steps=3 --set domains=[stories,stories:0.90+code:0.10]
+shift_q25  configs/toy_D.yaml  2  --set confirm_steps=3 --set domains=[stories,stories:0.75+code:0.25]
+shift_q50  configs/toy_D.yaml  2  --set confirm_steps=3 --set domains=[stories,stories:0.50+code:0.50]
+shift_none configs/toy_D.yaml  2  --set confirm_steps=3 --set domains=[stories,stories]
