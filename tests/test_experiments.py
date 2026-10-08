@@ -143,6 +143,20 @@ def test_mixture_phase_proportions():
         assert all(bool((row < 200).all()) or bool((row >= 200).all()) for row in rows)
 
 
+def test_ramp_phase_share_rises_linearly():
+    assert parse_phase("ramp:a:b:0.5") == [("a", 0.75), ("b", 0.25)]   # phase-average mix
+    assert base_domains(["a", "ramp:a:b:1.0"]) == ["a", "b"]
+    with _TmpDir() as td:
+        root = Path(td)
+        _write_data(root)
+        stream = DomainStream(root, ["a", "ramp:a:b:1.0"], 200, BATCH, SEQ, 0)
+        phase2 = list(itertools.islice(iter(stream), 200, 400))
+        del stream
+        share = lambda bs: np.mean([bool((row >= 200).all()) for b in bs for row in b.x])  # noqa: E731
+        early, mid, late = share(phase2[:20]), share(phase2[90:110]), share(phase2[-20:])
+        assert early < 0.12 and abs(mid - 0.5) < 0.12 and late > 0.88, (early, mid, late)
+
+
 # ---------------------------------------------------------------------------
 # Replay
 # ---------------------------------------------------------------------------
