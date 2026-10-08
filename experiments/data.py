@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 import numpy as np
 import torch
@@ -33,10 +33,25 @@ def _windows(arr: np.ndarray, starts: np.ndarray, seq_len: int) -> tuple[Tensor,
     return t[:, :-1], t[:, 1:]
 
 
+def parse_ramp(spec: str) -> Optional[tuple[str, str, float]]:
+    """``"ramp:stories:code:0.5"`` -> ("stories", "code", 0.5): a gradual-drift
+    phase whose share of ``code`` rises linearly from 0 at the phase's first
+    step to 0.5 at its last. Returns None for any other spec."""
+    if not spec.startswith("ramp:"):
+        return None
+    _, old, new, q = spec.split(":")
+    return old, new, float(q)
+
+
 def parse_phase(spec: str) -> list[tuple[str, float]]:
     """``"stories"`` -> [("stories", 1.0)];
     ``"stories:0.9+code:0.1"`` -> [("stories", 0.9), ("code", 0.1)] (a mixture
-    phase: each sequence is drawn from one domain with these probabilities)."""
+    phase: each sequence is drawn from one domain with these probabilities).
+    A ramp phase (see :func:`parse_ramp`) reports its phase-average mix."""
+    ramp = parse_ramp(spec)
+    if ramp is not None:
+        old, new, q = ramp
+        return [(old, 1.0 - q / 2), (new, q / 2)]
     parts = []
     for item in spec.split("+"):
         name, _, w = item.partition(":")
@@ -97,26 +112,35 @@ class DomainStream:
         """Global steps at which a new domain begins (excluding step 0)."""
         return [self.steps_per_phase * i for i in range(1, len(self.domains))]
 
+    def _rows(self, names: list[str], pick) -> tuple[Tensor, Tensor]:
+        rows = []
+        for k in pick:
+            arr = self.data[names[k]]
+            start = self.rng.integers(0, len(arr) - self.seq_len - 1)
+            rows.append(np.asarray(arr[start:start + self.seq_len + 1]))
+        t = torch.from_numpy(np.stack(rows).astype(np.int64))
+        return t[:, :-1], t[:, 1:]
+
     def __iter__(self) -> Iterator[Batch]:
         step = 0
         for d_id, mix in enumerate(self.phases):
             names = [n for n, _ in mix]
             probs = np.array([w for _, w in mix])
+            ramp = parse_ramp(self.domains[d_id])
             for ps in range(self.steps_per_phase):
-                if len(mix) == 1:
+                if ramp is not None:
+                    # Gradual drift: P(new domain) grows linearly over the phase.
+                    q_t = ramp[2] * ps / max(1, self.steps_per_phase - 1)
+                    pick = (self.rng.random(self.batch_size) < q_t).astype(int)
+                    x, y = self._rows([ramp[0], ramp[1]], pick)
+                elif len(mix) == 1:
                     arr = self.data[names[0]]
                     hi = len(arr) - self.seq_len - 1
                     starts = self.rng.integers(0, hi, size=self.batch_size)
                     x, y = _windows(arr, starts, self.seq_len)
                 else:
                     pick = self.rng.choice(len(mix), size=self.batch_size, p=probs)
-                    rows = []
-                    for k in pick:
-                        arr = self.data[names[k]]
-                        start = self.rng.integers(0, len(arr) - self.seq_len - 1)
-                        rows.append(np.asarray(arr[start:start + self.seq_len + 1]))
-                    t = torch.from_numpy(np.stack(rows).astype(np.int64))
-                    x, y = t[:, :-1], t[:, 1:]
+                    x, y = self._rows(names, pick)
                 yield Batch(x, y, d_id, ps, step)
                 step += 1
 

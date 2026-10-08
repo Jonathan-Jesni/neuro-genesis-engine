@@ -1,0 +1,16 @@
+# Day 9 (2026-10-08): gradual drift. Day 8 tested abrupt switches; here phase 2
+# starts as pure stories and the share of code rises LINEARLY over the phase to
+# q_max = 25 / 50 / 100% (ramp:stories:code:<q_max>). Same detector (z > 4 for
+# 3 consecutive steps over a 50-step window). Question: does a slow drift ever
+# look like a spike, and if so, how far into the ramp does it fire?
+# 2 phases, ~3 min/run.
+
+drift_q25   configs/toy_D.yaml  0  --set confirm_steps=3 --set domains=[stories,ramp:stories:code:0.25]
+drift_q50   configs/toy_D.yaml  0  --set confirm_steps=3 --set domains=[stories,ramp:stories:code:0.50]
+drift_q100  configs/toy_D.yaml  0  --set confirm_steps=3 --set domains=[stories,ramp:stories:code:1.0]
+drift_q25   configs/toy_D.yaml  1  --set confirm_steps=3 --set domains=[stories,ramp:stories:code:0.25]
+drift_q50   configs/toy_D.yaml  1  --set confirm_steps=3 --set domains=[stories,ramp:stories:code:0.50]
+drift_q100  configs/toy_D.yaml  1  --set confirm_steps=3 --set domains=[stories,ramp:stories:code:1.0]
+drift_q25   configs/toy_D.yaml  2  --set confirm_steps=3 --set domains=[stories,ramp:stories:code:0.25]
+drift_q50   configs/toy_D.yaml  2  --set confirm_steps=3 --set domains=[stories,ramp:stories:code:0.50]
+drift_q100  configs/toy_D.yaml  2  --set confirm_steps=3 --set domains=[stories,ramp:stories:code:1.0]
