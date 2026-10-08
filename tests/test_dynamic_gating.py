@@ -389,11 +389,38 @@ class Looper(nn.Module):
         return x
 """
     try:
-        foundry.register_expert_from_source(loop_src)
-        assert False, "expected timeout failure"
-    except ExpertValidationError as exc:
-        assert "timeout" in str(exc).lower()
-    assert gate.num_experts == 4 and len(experts) == 4
+        try:
+            foundry.register_expert_from_source(loop_src)
+            assert False, "expected timeout failure"
+        except ExpertValidationError as exc:
+            assert "timeout" in str(exc).lower()
+        assert gate.num_experts == 4 and len(experts) == 4
+    finally:
+        _stop_abandoned_smoke_threads()
+
+
+def _stop_abandoned_smoke_threads() -> None:
+    """Stop worker threads the foundry abandoned on timeout.
+
+    Python cannot kill a thread, so the foundry leaves a hung smoke-test worker
+    running as a daemon. Here that worker is a ``while True`` loop: left alone it
+    spins for the rest of the session, contending for the GIL and slowing every
+    later test that makes many small torch calls by ~50x (it made CI time out
+    once tests/test_experiments.py was added). Raising SystemExit inside the
+    thread stops it at its next bytecode; the worker's ``except BaseException``
+    records it and the thread exits.
+    """
+    import ctypes
+
+    stuck = [t for t in threading.enumerate() if t.name == "expert-smoke-test" and t.is_alive()]
+    for t in stuck:
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(t.ident), ctypes.py_object(SystemExit)
+        )
+    for t in stuck:
+        t.join(timeout=5.0)
+    still = [t for t in stuck if t.is_alive()]
+    assert not still, f"could not stop {len(still)} abandoned smoke-test thread(s)"
 
 
 # ---------------------------------------------------------------------------
