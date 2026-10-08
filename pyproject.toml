@@ -20,7 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 experiments = ["datasets", "tiktoken", "pyyaml", "matplotlib"]
 gemma = ["transformers>=4.56", "accelerate", "python-dotenv"]
-test = ["pytest>=7.0"]
+test = ["pytest>=7.0", "pyyaml"]   # pyyaml: tests import experiments.train
 
 [tool.setuptools.packages.find]
 include = ["core*", "experiments*"]
