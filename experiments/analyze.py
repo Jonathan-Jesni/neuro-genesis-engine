@@ -15,6 +15,7 @@ Figures:
     scale        same four methods at 22M vs 101M params (toy_ vs big_ arms)
     source       generated (Gemma) vs random-init new experts, size-matched control
     sensitivity  detection vs shift size for two-phase mixture runs (day 8)
+    drift        training loss for an abrupt switch vs gradual drift (day 9)
 
 Use --arms to restrict every figure to a readable subset, e.g.
     python -m experiments.analyze --arms toy_A toy_D toy_D_seen toy_A_replay --out figs/main
@@ -428,6 +429,53 @@ def fig_sensitivity(runs: list[Run], out: Path) -> None:
     plt.close(fig)
 
 
+DRIFT_ARMS = [("shift_q50", "abrupt switch to 50% code", "#059669", "-"),
+              ("drift_q50", "gradual drift to 50% code", "#d97706", "-"),
+              ("drift_q100", "gradual drift to 100% code", "#dc2626", "-")]
+
+
+def fig_drift(runs: list[Run], out: Path) -> None:
+    """Training loss (mean over seeds) for an abrupt switch vs gradual drift,
+    with the detector's firings marked. Phase 2 starts at the dashed line."""
+    by = defaultdict(list)
+    for r in runs:
+        if r.steps:
+            by[r.arm].append(r)
+    if not any(a in by for a, *_ in DRIFT_ARMS):
+        return
+    fig, ax = plt.subplots(figsize=(8.5, 3.8))
+    b = None
+    for arm, label, color, ls in DRIFT_ARMS:
+        rs = by.get(arm, [])
+        if not rs:
+            continue
+        b = rs[0].boundaries[0]
+        curves = defaultdict(list)
+        for r in rs:
+            for x in r.steps:
+                if x["step"] >= 200:
+                    curves[x["step"]].append(x["loss"])
+        xs = sorted(curves)
+        ys = [np.mean(curves[x]) for x in xs]
+        n_fired = sum(1 for r in rs if any(e["reason"] == "loss_spike" for e in r.events))
+        ax.plot(xs, ys, color=color, ls=ls, lw=1.6,
+                label=f"{label}: detected in {n_fired}/{len(rs)} runs")
+        for r in rs:
+            for e in r.events:
+                y = np.interp(e["step"], xs, ys)
+                ax.plot(e["step"], y, "v", color=color, ms=8, zorder=5)
+    if b is not None:
+        ax.axvline(b, color="#374151", ls="--", lw=0.9)
+        ax.text(b + 15, ax.get_ylim()[1], "phase 2 starts", va="top", fontsize=8, color="#374151")
+    ax.set_xlabel("training step  (triangles = detector fired)")
+    ax.set_ylabel("training loss")
+    ax.legend(frameon=False, fontsize=8, loc="upper left")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out / "drift.png", dpi=160)
+    plt.close(fig)
+
+
 def fig_scale(runs: list[Run], out: Path) -> None:
     """Forgetting and final loss for the same four methods at two model sizes
     (arm prefix toy_ = 22M, big_ = 101M), mean +- std over seeds."""
@@ -534,7 +582,7 @@ def main() -> None:
     p.add_argument("--fig", nargs="+", default=["all"],
                    choices=["all", "experts", "heldout", "detection", "tradeoff", "leak",
                             "leakplot", "detectplot", "budget", "scale", "source",
-                            "sensitivity"])
+                            "sensitivity", "drift"])
     p.add_argument("--arms", nargs="+", default=None,
                    help="only include these arms (run-name prefix before _s<seed>)")
     args = p.parse_args()
@@ -570,6 +618,8 @@ def main() -> None:
         fig_source(runs, out)
     if every or "sensitivity" in want:
         fig_sensitivity(runs, out)
+    if every or "drift" in want:
+        fig_drift(runs, out)
     partial = [r.name for r in runs if not r.complete]
     print(f"wrote figures to {out}  ({len(runs)} runs"
           + (f", partial: {', '.join(partial)}" if partial else "") + ")")

@@ -167,8 +167,25 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
     threshold. No trigger fired anywhere except just after a real switch
     (0 false triggers in 15 runs × 2440 steps). Together with finding 1: the
     detector is reliable for shifts that move the loss by ≳0.2 nats; smaller
-    or gradual drift would need a lower threshold or a slower, averaged
-    signal (not tested).
+    shifts would need a lower threshold.
+16. **Gradual drift is never detected** (day 9, fig 9). Same two-phase setup,
+    but phase 2's code share rises *linearly* from 0 to q_max over its 1220
+    steps (`ramp:stories:code:<q_max>`), 3 seeds each:
+
+    | Phase 2 | Detected | Training loss, end of phase 2 vs end of phase 1 |
+    |---|---|---|
+    | abrupt 25% code (day 8) | 3/3, 2–5 steps | jump of +0.59 at the switch |
+    | abrupt 50% code (day 8) | 3/3, 2 steps | jump of +1.15 at the switch |
+    | drift to 25% | 0/3 | +0.03 |
+    | drift to 50% | 0/3 | +0.23 |
+    | drift to 100% | 0/3 | +0.49 |
+
+    Drifting all the way to pure code raises the loss by 0.49 — as much as
+    the abrupt 25% switch that is caught every time — but spread over 1220
+    steps, so the detector's 50-step rolling baseline rises with it and no
+    step ever stands out. A loss-spike detector only sees *changes in the
+    rate*, not slow accumulation; catching drift would need a long-horizon
+    reference (e.g. a frozen baseline window or held-out-loss trend).
 
 ## Figures (`results/figures/`)
 
@@ -187,10 +204,11 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
    size and size-matched), without and with seen-token freezing.
 8. `8_detection_sensitivity.png` — loss jump and detection delay vs shift
    size (0–50% code), one dot per seed.
+9. `9_gradual_drift.png` — training loss for an abrupt switch vs gradual
+   drift, with detector firings marked.
 
 ## Open / in progress
 
 - Experiments complete; remaining work is the write-up.
-- Not tested: gradual drift (shift ramps in slowly rather than switching).
 - Not started: expert pruning, GPT-2 (pretrained, upcycled) runs, learning-rate re-warm for the
   replay baseline.
