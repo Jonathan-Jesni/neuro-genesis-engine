@@ -17,4 +17,8 @@ jobs:
       # CPU-only torch wheel: small and fast to install; GPU paths are exercised locally / on ROCm.
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[test]"
-      - run: pytest -q
+      # -v names each test as it finishes; faulthandler dumps every thread's stack
+      # if one test runs past 4 min, so a hang shows exactly where it is stuck.
+      - run: pytest -v --durations=10 -o faulthandler_timeout=240
+        env:
+          PYTHONUNBUFFERED: "1"
