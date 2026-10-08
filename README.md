@@ -121,10 +121,10 @@ A 300-step run on a synthetic regression task that injects an out-of-distributio
 ### Tests
 
 ```bash
-pytest tests/ -v        # 44 passed, 1 skipped (the opt-in live Gemma test)
+pytest tests/ -v        # 62 passed, 1 skipped (the opt-in live Gemma test)
 ```
 
-44 offline tests cover gate concurrency, optimizer remapping, foundry validation and rollback, the orchestrator's retry and checkpoint logic, and the Gemma prompt/extraction code. Every test file also runs standalone (`python tests/test_orchestrator.py`). The live test loads the real model: `NGEN_RUN_GEMMA_LIVE=1 pytest tests/test_gemma_generator.py`.
+62 offline tests, no GPU or network needed. 44 cover the engine: gate concurrency, optimizer remapping, foundry validation and rollback, the orchestrator's retry and checkpoint logic, and the Gemma prompt/extraction code. 18 cover the experiment code on tiny synthetic data: every freezing mode, the replay buffer and fractional budgets, mixture phases, growth with generated and size-matched experts, detector firing and silence, and bit-exact reproducibility. Every test file also runs standalone (`python tests/test_experiments.py`). The live test loads the real model: `NGEN_RUN_GEMMA_LIVE=1 pytest tests/test_gemma_generator.py`.
 
 ### AMD hardware and Docker
 
@@ -179,7 +179,7 @@ configs/                     base configs for each method
 results/
   NOTES.md                   every finding with full tables
   figures/                   the eight result figures
-tests/                       44 offline tests + 1 opt-in live Gemma test
+tests/                       62 offline tests + 1 opt-in live Gemma test
 .agents/skills/              usage contracts for the gate, foundry and optimizer remap
 demo.py, resume_demo.py      GPU smoke check; resume the orchestrator demo
 orchestrator_viz.html        animated playback of the AMD-hardware demo run
