@@ -224,6 +224,16 @@ class Freezer:
             model.tok.weight[self.emb_rows] = self.emb_snap
 
 
+def replay_rows(n_base: int, remainder: float, rng: np.random.Generator) -> int:
+    """Replay rows for one batch: ``n_base`` plus one more with probability
+    ``remainder`` (fractional budgets, e.g. 1% of 32 = 0.32 rows/step). Draws
+    from ``rng`` only when the remainder is non-zero, so integer budgets
+    consume no randomness and reproduce runs made before this existed."""
+    if remainder > 1e-9 and rng.random() < remainder:
+        return n_base + 1
+    return n_base
+
+
 class ReplayBuffer:
     """Reservoir sample of past training windows (x plus the final target token).
 
@@ -367,9 +377,7 @@ def run(cfg: dict, seed: int) -> dict:
         fresh = cfg["batch_size"]
         n_replay = 0
         if replay is not None and replay.size > 0:
-            n_replay = n_replay_base
-            if n_replay_rem > 1e-9 and replay.rng.random() < n_replay_rem:
-                n_replay += 1
+            n_replay = replay_rows(n_replay_base, n_replay_rem, replay.rng)
         if n_replay > 0:
             fresh = cfg["batch_size"] - n_replay
             rx, ry = replay.sample(n_replay)
