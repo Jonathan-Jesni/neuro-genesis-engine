@@ -131,7 +131,7 @@ def fig_experts(runs: list[Run], out: Path) -> None:
         seen.add(r.arm)
         ax.step(xs, ys, where="post", color=c, lw=1.8, alpha=0.85, label=lab)
         for e in r.events:
-            ax.plot(e["step"], e["experts"], marker="v" if e["reason"] == "loss_spike" else "o",
+            ax.plot(e["step"], e["experts"], marker="v" if e["reason"] in ("loss_spike", "loss_drift") else "o",
                     color=c, ms=6, zorder=5)
     ax.set_xlabel("training step")
     ax.set_ylabel("experts per layer")
@@ -181,9 +181,9 @@ def detection_table(runs: list[Run], out: Path, window: int = 100) -> None:
     boundary counts as detecting it; any other trigger is a false trigger."""
     rows = []
     for r in runs:
-        if r.arm != "toy_D" and not any(e["reason"] == "loss_spike" for e in r.events):
+        if r.arm != "toy_D" and not any(e["reason"] in ("loss_spike", "loss_drift") for e in r.events):
             continue
-        trig = [e["step"] for e in r.events if e["reason"] == "loss_spike"]
+        trig = [e["step"] for e in r.events if e["reason"] in ("loss_spike", "loss_drift")]
         last = r.steps[-1]["step"] if r.steps else 0
         reached = [b for b in r.boundaries if b <= last]
         used, lat = set(), []
@@ -392,7 +392,7 @@ def fig_sensitivity(runs: list[Run], out: Path) -> None:
     for r in rs:
         pre = [x["loss"] for x in r.steps if b - 100 <= x["step"] < b]
         post = [x["loss"] for x in r.steps if b <= x["step"] < b + 100]
-        trig = [e["step"] for e in r.events if e["reason"] == "loss_spike"]
+        trig = [e["step"] for e in r.events if e["reason"] in ("loss_spike", "loss_drift")]
         hit = next((t for t in trig if b <= t < b + 300), None)
         rows.append((_shift_share(r), np.mean(post) - np.mean(pre), hit - b if hit else None,
                      len([t for t in trig if t != hit])))
@@ -457,7 +457,7 @@ def fig_drift(runs: list[Run], out: Path) -> None:
                     curves[x["step"]].append(x["loss"])
         xs = sorted(curves)
         ys = [np.mean(curves[x]) for x in xs]
-        n_fired = sum(1 for r in rs if any(e["reason"] == "loss_spike" for e in r.events))
+        n_fired = sum(1 for r in rs if any(e["reason"] in ("loss_spike", "loss_drift") for e in r.events))
         ax.plot(xs, ys, color=color, ls=ls, lw=1.6,
                 label=f"{label}: detected in {n_fired}/{len(rs)} runs")
         for r in rs:
