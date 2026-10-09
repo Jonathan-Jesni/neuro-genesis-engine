@@ -30,6 +30,7 @@ from experiments.data import DomainStream, base_domains, parse_phase  # noqa: E4
 from experiments.model import ModelConfig, MoEGPT, count_params, expert_source  # noqa: E402
 from experiments.train import (  # noqa: E402
     DEFAULTS,
+    DriftDetector,
     Freezer,
     ReplayBuffer,
     replay_rows,
@@ -297,6 +298,23 @@ def test_signal_detector_fires_after_shift_with_confirmation():
         assert len(steps) == 2, steps
         assert 42 <= steps[0] < 50 and 82 <= steps[1] < 90, steps
         assert s["experts_final"] == 6
+
+
+def test_drift_detector_catches_slow_rise_but_not_noisy_descent():
+    rng = np.random.default_rng(0)
+    # Typical training: loss falls with noise -> must never fire.
+    calm = DriftDetector(ema=0.02, rel=0.10, sustain=20, warmup=200)
+    falling = [3.0 * np.exp(-i / 800) + 2.0 + rng.normal(0, 0.08) for i in range(3000)]
+    assert all(calm.update(x) is None for x in falling)
+    # Slow drift: +25% over 1000 steps, no step-to-step jump -> must fire.
+    drift = DriftDetector(ema=0.02, rel=0.10, sustain=20, warmup=200)
+    flat = [2.5 + rng.normal(0, 0.08) for _ in range(500)]
+    rise = [2.5 * (1 + 0.25 * i / 1000) + rng.normal(0, 0.08) for i in range(1000)]
+    fired = [i for i, x in enumerate(flat + rise) if drift.update(x) is not None]
+    assert fired and 500 < fired[0] < 1500, fired[:3]
+    # reset() re-arms the warm-up, so it cannot fire again immediately.
+    drift.reset()
+    assert all(drift.update(3.2) is None for _ in range(150))
 
 
 def test_signal_detector_stays_silent_without_a_shift():
