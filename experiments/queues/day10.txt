@@ -1,0 +1,32 @@
+# Day 10 (2026-10-09): drift-aware detection. Day 9 showed the 50-step z-score
+# never sees gradual drift. Here the signal arm also runs DriftDetector (EMA of
+# the loss vs its lowest value since the last growth; fires at >10% above for
+# 20 steps; defaults ema=0.02, sustain=20, warmup=200), alongside the unchanged
+# spike detector. Questions: does it catch drift, and what does it cost in
+# false alarms and in normal abrupt-shift runs?
+#   dd_drift_*  stories -> ramp to q% code (compare day 9: 0/9 detected)
+#   dd_none     stories -> stories (false alarms?)
+#   dd_q10      stories -> 10% code, abrupt (still caught, same delay?)
+#   dd_toy_D    the normal 3-domain run (extra growth beyond the 2 boundaries?)
+# ~3 min per two-phase run, ~4.3 min per 3-domain run.
+
+dd_drift_q25   configs/toy_D.yaml  0  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,ramp:stories:code:0.25]
+dd_drift_q50   configs/toy_D.yaml  0  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,ramp:stories:code:0.50]
+dd_drift_q100  configs/toy_D.yaml  0  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,ramp:stories:code:1.0]
+dd_none        configs/toy_D.yaml  0  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,stories]
+dd_q10         configs/toy_D.yaml  0  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,stories:0.90+code:0.10]
+dd_toy_D       configs/toy_D.yaml  0  --set confirm_steps=3 --set drift_detector.rel=0.10
+
+dd_drift_q25   configs/toy_D.yaml  1  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,ramp:stories:code:0.25]
+dd_drift_q50   configs/toy_D.yaml  1  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,ramp:stories:code:0.50]
+dd_drift_q100  configs/toy_D.yaml  1  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,ramp:stories:code:1.0]
+dd_none        configs/toy_D.yaml  1  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,stories]
+dd_q10         configs/toy_D.yaml  1  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,stories:0.90+code:0.10]
+dd_toy_D       configs/toy_D.yaml  1  --set confirm_steps=3 --set drift_detector.rel=0.10
+
+dd_drift_q25   configs/toy_D.yaml  2  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,ramp:stories:code:0.25]
+dd_drift_q50   configs/toy_D.yaml  2  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,ramp:stories:code:0.50]
+dd_drift_q100  configs/toy_D.yaml  2  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,ramp:stories:code:1.0]
+dd_none        configs/toy_D.yaml  2  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,stories]
+dd_q10         configs/toy_D.yaml  2  --set confirm_steps=3 --set drift_detector.rel=0.10 --set domains=[stories,stories:0.90+code:0.10]
+dd_toy_D       configs/toy_D.yaml  2  --set confirm_steps=3 --set drift_detector.rel=0.10
