@@ -434,18 +434,30 @@ DRIFT_ARMS = [("shift_q50", "abrupt switch to 50% code", "#059669", "-"),
               ("drift_q100", "gradual drift to 100% code", "#dc2626", "-")]
 
 
+DRIFT_DETECTOR_ARMS = [
+    ("drift_q100", "drift to 100% code, spike detector only", "#9ca3af", "--"),
+    ("dd_drift_q100", "drift to 100% code, + drift detector", "#dc2626", "-"),
+    ("dd_drift_q50", "drift to 50% code, + drift detector", "#d97706", "-"),
+]
+
+
 def fig_drift(runs: list[Run], out: Path) -> None:
     """Training loss (mean over seeds) for an abrupt switch vs gradual drift,
-    with the detector's firings marked. Phase 2 starts at the dashed line."""
+    with the detector's firings marked. Phase 2 starts at the dashed line.
+    If the drift-detector runs (dd_*) are present, plots those instead
+    (``drift_detector.png``) to compare against the spike detector alone."""
     by = defaultdict(list)
     for r in runs:
         if r.steps:
             by[r.arm].append(r)
-    if not any(a in by for a, *_ in DRIFT_ARMS):
+    arms, fname = DRIFT_ARMS, "drift.png"
+    if any(a in by for a, *_ in DRIFT_DETECTOR_ARMS[1:]):
+        arms, fname = DRIFT_DETECTOR_ARMS, "drift_detector.png"
+    if not any(a in by for a, *_ in arms):
         return
     fig, ax = plt.subplots(figsize=(8.5, 3.8))
     b = None
-    for arm, label, color, ls in DRIFT_ARMS:
+    for arm, label, color, ls in arms:
         rs = by.get(arm, [])
         if not rs:
             continue
@@ -472,7 +484,7 @@ def fig_drift(runs: list[Run], out: Path) -> None:
     ax.legend(frameon=False, fontsize=8, loc="upper left")
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    fig.savefig(out / "drift.png", dpi=160)
+    fig.savefig(out / fname, dpi=160)
     plt.close(fig)
 
 
