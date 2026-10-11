@@ -207,8 +207,22 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
     so adding it costs nothing there. It fires once the *accumulated* rise
     passes the 10% margin: a fast drift crosses it after ~25% of the data has
     changed, a half-speed drift only near the end of the phase, and a small
-    drift never. The trade-off between margin and false alarms (0 here at
-    10%) was not swept.
+    drift never.
+
+    **Margin sweep** (day 11, 3 seeds each; same runs, margin 5% / 10% / 15%):
+
+    | Margin | drift to 25% | drift to 50% | drift to 100% | no shift | normal 3-domain run |
+    |---|---|---|---|---|---|
+    | 5% | 0/3 | **3/3, at 14–24% code** | — | 0/3 (no false alarm) | spike only, identical |
+    | 10% | 0/3 | 2/3, at 46–50% code | 3/3, at 25–28% code | 0/3 | spike only, identical |
+    | 15% | — | 0/3 | 3/3, at 45–50% code | — | — |
+
+    A tighter margin catches drift earlier and more reliably, and at 5% there
+    were still no false alarms anywhere, so 5% dominates 10% in this setup.
+    15% is too strict (misses the 50% drift, catches the 100% drift only
+    halfway). No margin catches the 25% drift (total loss rise ~1%). The
+    margin at which false alarms start was not reached — lower margins are
+    untested.
 
 ## Figures (`results/figures/`)
 
