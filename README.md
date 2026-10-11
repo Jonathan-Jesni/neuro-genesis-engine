@@ -5,7 +5,7 @@
 This repository contains two things:
 
 1. **The engine** — a Mixture-of-Experts layer whose expert count can grow *while the network is training*, plus a foundry that turns PyTorch source code (including code written by a local LLM) into validated, live experts. Originally built for the AMD Developer Hackathon ACT II.
-2. **A study of whether that is useful** — about 160 training runs of continual pretraining on an AMD Radeon Pro W7900D, comparing growth against plain training, freezing strategies, and data replay, with 3–6 seeds per setting.
+2. **A study of whether that is useful** — about 180 training runs of continual pretraining on an AMD Radeon Pro W7900D, comparing growth against plain training, freezing strategies, and data replay, with 3–6 seeds per setting.
 
 The short answer: **detecting the shift works; growing experts in response does not reduce forgetting, at any replay budget or at either model size we tested — while replaying even 1% of old data does.** The study also measures *why* growth fails and answers whether LLM-written experts beat randomly initialised ones (they don't).
 
@@ -20,7 +20,8 @@ The setup: a small MoE language model is trained on three text domains in sequen
 | Finding | Evidence |
 |---|---|
 | **The model detects domain changes by itself.** A rolling z-score on its own training loss caught **132 of 132** boundaries across 66 runs, always 2 steps after the change, with **zero false alarms**. | [fig 3](results/figures/3_detection.png) |
-| **It catches abrupt shifts down to about 10% of the data — but not gradual drift.** Switching 10%+ of the data to a new domain is always detected (within 2–10 steps); 5% is caught 1 time in 3; no change, never. Drifting *slowly* to 100% code is never detected, even though it raises the loss as much as a 25% switch that always is. | [fig 8](results/figures/8_detection_sensitivity.png), [fig 9](results/figures/9_gradual_drift.png) |
+| **It catches abrupt shifts down to about 10% of the data — but not gradual drift.** Switching 10%+ of the data to a new domain is always detected (within 2–10 steps); 5% is caught 1 time in 3; no change, never. Drifting *slowly* to 100% code is never detected by the spike detector, even though it raises the loss as much as a 25% switch that always is. | [fig 8](results/figures/8_detection_sensitivity.png), [fig 9](results/figures/9_gradual_drift.png) |
+| **A second, long-horizon detector fixes most of the drift gap at no cost.** Comparing the smoothed loss against its lowest point since the last growth catches drift to 100% code in 3/3 runs (once ~25% of the data has changed) and to 50% in 2/3, with zero false alarms — and abrupt and normal runs are bit-identical with or without it. | [fig 10](results/figures/10_drift_detector.png) |
 | **Growing experts on detection does not reduce forgetting.** Normal MoE: 1.51 forgetting. Growing at every detected change: 1.53. Growing at the *true* boundaries (oracle): 1.54. | [fig 1](results/figures/1_tradeoff.png) |
 | **Why: two shared paths leak.** With every old weight frozen, the router still sends old-domain tokens to the new experts (32% → 68% as more experts are added; correlation with forgetting r = 0.80), and the token embeddings — shared by every domain, and tied to the output layer — drift. | [fig 4](results/figures/4_router_leak.png) |
 | **Best method that stores no old data: freeze the embeddings of already-seen tokens.** −30% forgetting at 22M params, −44% at 101M — but always at a cost in learning the new domains. | [fig 6](results/figures/6_scale.png) |
@@ -30,7 +31,7 @@ The setup: a small MoE language model is trained on three text domains in sequen
 
 ![Forgetting and final loss vs replay budget](results/figures/5_replay_budget.png)
 
-Every number, table, and caveat is in **[`results/NOTES.md`](results/NOTES.md)** (16 findings), with all nine figures in [`results/figures/`](results/figures/).
+Every number, table, and caveat is in **[`results/NOTES.md`](results/NOTES.md)** (17 findings), with all ten figures in [`results/figures/`](results/figures/).
 
 ## Setup
 
@@ -83,6 +84,7 @@ bash experiments/run_queue.sh experiments/queues/day4.txt
 | `day7b.txt`, `day7c.txt` | 14 (Gemma-written vs random experts) |
 | `day8.txt` | 15 (detection sensitivity) |
 | `day9.txt` | 16 (gradual drift) |
+| `day10.txt` | 17 (drift-aware detector) |
 
 **4. Tables and figures:**
 
@@ -149,7 +151,7 @@ docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video --group-ad
 **Of the study**
 
 - **Small models, short training.** 22M and 101M parameters, trained from scratch on 30M tokens. The conclusions held across that 4.5× range, but we did not test pretrained models or billions of tokens, where the trade-offs could differ (seen-token freezing, for one, got relatively better with size).
-- **Three domains, and a short-horizon detector.** Abrupt changes are caught down to about a 10% shift, but gradual drift is missed entirely: the detector compares against the last 50 steps, so a slow rise never looks like a spike. Catching drift needs a long-horizon reference, which we did not build.
+- **Detection has limits.** Abrupt changes are caught down to about a 10% shift. The spike detector alone misses gradual drift entirely; the added drift detector catches fast drift but fires late on slow drift and never on small drift, and its 10% margin was not tuned against false alarms.
 - **One detector.** A loss z-score with a fixed threshold (z > 4 for 3 steps). Other signals (routing entropy, expert load) were logged but not compared.
 - **The replay baseline has no learning-rate re-warming**, which published continual-pretraining recipes add; it already dominates without it.
 - **Gemma's designs had little variety** (nearly all LayerNorm → 256→128 → 128→256), so "LLM-written vs random" was tested on a narrow range of designs.
@@ -172,14 +174,14 @@ experiments/
   model.py                   small MoE GPT with live expert growth
   train.py                   one run: growth, freezing, replay, expert sources, logging
   run_queue.sh               resumable sequential runner for a queue file
-  queues/                    one file per experiment session (day3 ... day9)
+  queues/                    one file per experiment session (day3 ... day10)
   summarize.py, analyze.py   results table and figures
   gen_experts.py             pre-generate Gemma-written expert designs
   generated_experts/         the designs used in the generated-vs-random runs
 configs/                     base configs for each method
 results/
   NOTES.md                   every finding with full tables
-  figures/                   the nine result figures
+  figures/                   the ten result figures
 tests/                       64 offline tests + 1 opt-in live Gemma test
 .agents/skills/              usage contracts for the gate, foundry and optimizer remap
 demo.py, resume_demo.py      GPU smoke check; resume the orchestrator demo

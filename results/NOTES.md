@@ -186,6 +186,29 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
     step ever stands out. A loss-spike detector only sees *changes in the
     rate*, not slow accumulation; catching drift would need a long-horizon
     reference (e.g. a frozen baseline window or held-out-loss trend).
+17. **A long-horizon drift detector catches fast drift at zero cost to
+    everything else** (day 10, fig 10). `DriftDetector` runs alongside the
+    unchanged spike detector: it keeps an EMA of the loss (α = 0.02) and that
+    EMA's lowest value since the last growth, and fires when the EMA stays
+    more than 10% above it for 20 steps (200-step warm-up after each reset).
+    3 seeds each:
+
+    | Run | Fired | When |
+    |---|---|---|
+    | drift to 100% code | 3/3, drift signal | 309–342 steps in, at 25–28% code |
+    | drift to 50% code | 2/3, drift signal | 1111–1215 steps in, at 46–50% code |
+    | drift to 25% code | 0/3 | (loss rises only ~1%) |
+    | no shift | 0/3 | no false alarms |
+    | abrupt 10% switch | 3/3, spike signal | steps 1225 / 1230 / 1223 — identical to day 8 |
+    | normal 3-domain run | 2 growths each, spike signal | 1222 and 2442 — identical to before |
+
+    The drift signal never fired in the abrupt or normal runs, which are
+    bit-identical to the runs without it (same growth steps, same final loss),
+    so adding it costs nothing there. It fires once the *accumulated* rise
+    passes the 10% margin: a fast drift crosses it after ~25% of the data has
+    changed, a half-speed drift only near the end of the phase, and a small
+    drift never. The trade-off between margin and false alarms (0 here at
+    10%) was not swept.
 
 ## Figures (`results/figures/`)
 
@@ -206,6 +229,8 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
    size (0–50% code), one dot per seed.
 9. `9_gradual_drift.png` — training loss for an abrupt switch vs gradual
    drift, with detector firings marked.
+10. `10_drift_detector.png` — the same drift runs with the long-horizon drift
+    detector added, against the spike detector alone.
 
 ## Open / in progress
 
