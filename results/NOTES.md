@@ -209,20 +209,23 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
     changed, a half-speed drift only near the end of the phase, and a small
     drift never.
 
-    **Margin sweep** (day 11, 3 seeds each; same runs, margin 5% / 10% / 15%):
+    **Margin sweep** (days 11 and 11b, 3 seeds each; margin 2% / 5% / 10% / 15%):
 
     | Margin | drift to 25% | drift to 50% | drift to 100% | no shift | normal 3-domain run |
     |---|---|---|---|---|---|
+    | 2% | **2/3, at 19–22% code** | — | — | 0/3 (no false alarm) | spike only, identical |
     | 5% | 0/3 | **3/3, at 14–24% code** | — | 0/3 (no false alarm) | spike only, identical |
     | 10% | 0/3 | 2/3, at 46–50% code | 3/3, at 25–28% code | 0/3 | spike only, identical |
     | 15% | — | 0/3 | 3/3, at 45–50% code | — | — |
 
-    A tighter margin catches drift earlier and more reliably, and at 5% there
-    were still no false alarms anywhere, so 5% dominates 10% in this setup.
-    15% is too strict (misses the 50% drift, catches the 100% drift only
-    halfway). No margin catches the 25% drift (total loss rise ~1%). The
-    margin at which false alarms start was not reached — lower margins are
-    untested.
+    A tighter margin catches drift earlier and more reliably, and even at 2%
+    there were no false alarms anywhere: no firing on unchanged data, and
+    normal 3-domain runs grew only at the two real boundaries, bit-identical
+    to runs without the drift detector. At 2% it catches even the small
+    25% drift (2/3), which every looser margin missed; 15% is too strict.
+    The margin at which false alarms start was not reached (below 2% is
+    untested) — over 2–10% the detector is safe in this setup, and tighter
+    is better.
 
 ## Figures (`results/figures/`)
 

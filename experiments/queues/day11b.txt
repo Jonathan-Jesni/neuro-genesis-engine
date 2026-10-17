@@ -1,0 +1,9 @@
+dd02_none      configs/toy_D.yaml  0  --set confirm_steps=3 --set drift_detector.rel=0.02 --set domains=[stories,stories]
+dd02_drift_q25 configs/toy_D.yaml  0  --set confirm_steps=3 --set drift_detector.rel=0.02 --set domains=[stories,ramp:stories:code:0.25]
+dd02_toy_D     configs/toy_D.yaml  0  --set confirm_steps=3 --set drift_detector.rel=0.02
+dd02_none      configs/toy_D.yaml  1  --set confirm_steps=3 --set drift_detector.rel=0.02 --set domains=[stories,stories]
+dd02_drift_q25 configs/toy_D.yaml  1  --set confirm_steps=3 --set drift_detector.rel=0.02 --set domains=[stories,ramp:stories:code:0.25]
+dd02_toy_D     configs/toy_D.yaml  1  --set confirm_steps=3 --set drift_detector.rel=0.02
+dd02_none      configs/toy_D.yaml  2  --set confirm_steps=3 --set drift_detector.rel=0.02 --set domains=[stories,stories]
+dd02_drift_q25 configs/toy_D.yaml  2  --set confirm_steps=3 --set drift_detector.rel=0.02 --set domains=[stories,ramp:stories:code:0.25]
+dd02_toy_D     configs/toy_D.yaml  2  --set confirm_steps=3 --set drift_detector.rel=0.02

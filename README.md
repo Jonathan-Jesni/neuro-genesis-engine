@@ -21,7 +21,7 @@ The setup: a small MoE language model is trained on three text domains in sequen
 |---|---|
 | **The model detects domain changes by itself.** A rolling z-score on its own training loss caught **132 of 132** boundaries across 66 runs, always 2 steps after the change, with **zero false alarms**. | [fig 3](results/figures/3_detection.png) |
 | **It catches abrupt shifts down to about 10% of the data — but not gradual drift.** Switching 10%+ of the data to a new domain is always detected (within 2–10 steps); 5% is caught 1 time in 3; no change, never. Drifting *slowly* to 100% code is never detected by the spike detector, even though it raises the loss as much as a 25% switch that always is. | [fig 8](results/figures/8_detection_sensitivity.png), [fig 9](results/figures/9_gradual_drift.png) |
-| **A second, long-horizon detector fixes most of the drift gap at no cost.** Comparing the smoothed loss against its lowest point since the last growth catches drift to 100% code in 3/3 runs and, with a 5% margin, drift to 50% in 3/3 (once 14–24% of the data has changed), with zero false alarms — and abrupt and normal runs are bit-identical with or without it. | [fig 10](results/figures/10_drift_detector.png) |
+| **A second, long-horizon detector fixes most of the drift gap at no cost.** Comparing the smoothed loss against its lowest point since the last growth catches drift to 100% code in 3/3 runs, drift to 50% in 3/3 with a 5% margin, and even drift to 25% in 2/3 with a 2% margin — with zero false alarms at every margin tested — and abrupt and normal runs are bit-identical with or without it. | [fig 10](results/figures/10_drift_detector.png) |
 | **Growing experts on detection does not reduce forgetting.** Normal MoE: 1.51 forgetting. Growing at every detected change: 1.53. Growing at the *true* boundaries (oracle): 1.54. | [fig 1](results/figures/1_tradeoff.png) |
 | **Why: two shared paths leak.** With every old weight frozen, the router still sends old-domain tokens to the new experts (32% → 68% as more experts are added; correlation with forgetting r = 0.80), and the token embeddings — shared by every domain, and tied to the output layer — drift. | [fig 4](results/figures/4_router_leak.png) |
 | **Best method that stores no old data: freeze the embeddings of already-seen tokens.** −30% forgetting at 22M params, −44% at 101M — but always at a cost in learning the new domains. | [fig 6](results/figures/6_scale.png) |
@@ -84,7 +84,7 @@ bash experiments/run_queue.sh experiments/queues/day4.txt
 | `day7b.txt`, `day7c.txt` | 14 (Gemma-written vs random experts) |
 | `day8.txt` | 15 (detection sensitivity) |
 | `day9.txt` | 16 (gradual drift) |
-| `day10.txt`, `day11.txt` | 17 (drift-aware detector, margin sweep) |
+| `day10.txt`, `day11.txt`, `day11b.txt` | 17 (drift-aware detector, margin sweep) |
 
 **4. Tables and figures:**
 
@@ -151,7 +151,7 @@ docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video --group-ad
 **Of the study**
 
 - **Small models, short training.** 22M and 101M parameters, trained from scratch on 30M tokens. The conclusions held across that 4.5× range, but we did not test pretrained models or billions of tokens, where the trade-offs could differ (seen-token freezing, for one, got relatively better with size).
-- **Detection has limits.** Abrupt changes are caught down to about a 10% shift. The spike detector alone misses gradual drift entirely; the added drift detector catches drift to 50% and 100% code but never a drift that raises the loss only ~1%, and margins below 5% (where false alarms would presumably start) were not tested.
+- **Detection has limits.** Abrupt changes are caught down to about a 10% shift. The spike detector alone misses gradual drift entirely; the added drift detector catches drift down to 25% code at a 2% margin, but not reliably (2/3), and margins below 2% (where false alarms would presumably start) were not tested.
 - **One detector.** A loss z-score with a fixed threshold (z > 4 for 3 steps). Other signals (routing entropy, expert load) were logged but not compared.
 - **The replay baseline has no learning-rate re-warming**, which published continual-pretraining recipes add; it already dominates without it.
 - **Gemma's designs had little variety** (nearly all LayerNorm → 256→128 → 128→256), so "LLM-written vs random" was tested on a narrow range of designs.
