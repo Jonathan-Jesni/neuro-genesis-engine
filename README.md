@@ -19,7 +19,7 @@ The setup: a small MoE language model is trained on three text domains in sequen
 
 | Finding | Evidence |
 |---|---|
-| **The model detects domain changes by itself.** A rolling z-score on its own training loss caught **132 of 132** boundaries across 66 runs, always 2 steps after the change, with **zero false alarms**. | [fig 3](results/figures/3_detection.png) |
+| **The model detects domain changes by itself.** A rolling z-score on its own training loss caught **150 of 150** boundaries across 75 runs, always 2 steps after the change, with **zero false alarms**. | [fig 3](results/figures/3_detection.png) |
 | **It catches abrupt shifts down to about 10% of the data — but not gradual drift.** Switching 10%+ of the data to a new domain is always detected (within 2–10 steps); 5% is caught 1 time in 3; no change, never. Drifting *slowly* to 100% code is never detected by the spike detector, even though it raises the loss as much as a 25% switch that always is. | [fig 8](results/figures/8_detection_sensitivity.png), [fig 9](results/figures/9_gradual_drift.png) |
 | **A second, long-horizon detector fixes most of the drift gap at no cost.** Comparing the smoothed loss against its lowest point since the last growth catches drift to 100% code in 3/3 runs, drift to 50% in 3/3 with a 5% margin, and even drift to 25% in 2/3 with a 2% margin — with zero false alarms at every margin tested — and abrupt and normal runs are bit-identical with or without it. | [fig 10](results/figures/10_drift_detector.png) |
 | **Growing experts on detection does not reduce forgetting.** Normal MoE: 1.51 forgetting. Growing at every detected change: 1.53. Growing at the *true* boundaries (oracle): 1.54. | [fig 1](results/figures/1_tradeoff.png) |
@@ -89,11 +89,12 @@ bash experiments/run_queue.sh experiments/queues/day4.txt
 **4. Tables and figures:**
 
 ```bash
-python -m experiments.summarize results           # mean ± std table over seeds
-python -m experiments.analyze --fig tradeoff --arms toy_A toy_D toy_D_seen toy_A_replay
+python -m experiments.summarize results                         # mean ± std table over seeds
+python -m experiments.analyze --paper --out results/figures     # regenerate published figures 1-10
+python -m experiments.analyze --fig tradeoff --arms toy_A toy_D toy_D_seen toy_A_replay   # any custom subset
 ```
 
-`python -m experiments.analyze --help` lists every figure. The Gemma-written expert designs are pre-generated and committed ([`experiments/generated_experts/d256.json`](experiments/generated_experts/d256.json)); regenerating them needs the gated Gemma weights (`python -m experiments.gen_experts`).
+`--paper` rebuilds every figure in [`results/figures/`](results/figures/) with the exact runs it was made from; `python -m experiments.analyze --help` lists every figure type. The Gemma-written expert designs are pre-generated and committed ([`experiments/generated_experts/d256.json`](experiments/generated_experts/d256.json)); regenerating them needs the gated Gemma weights (`python -m experiments.gen_experts`).
 
 > **Cloud note.** On the AMD cloud notebook, running several training processes on the GPU at once crashed all of them (HIP illegal-memory-access errors); one process at a time never failed, which is why the queue runner is strictly sequential.
 
@@ -124,10 +125,10 @@ A 300-step run on a synthetic regression task that injects an out-of-distributio
 ### Tests
 
 ```bash
-pytest tests/ -v        # 64 passed, 1 skipped (the opt-in live Gemma test)
+pytest tests/ -v        # 67 passed, 1 skipped (the opt-in live Gemma test)
 ```
 
-64 offline tests, no GPU or network needed. 44 cover the engine: gate concurrency, optimizer remapping, foundry validation and rollback, the orchestrator's retry and checkpoint logic, and the Gemma prompt/extraction code. 20 cover the experiment code on tiny synthetic data: every freezing mode, the replay buffer and fractional budgets, mixture and gradual-drift phases, growth with generated and size-matched experts, both detectors firing and staying silent, and bit-exact reproducibility. Every test file also runs standalone (`python tests/test_experiments.py`). The live test loads the real model: `NGEN_RUN_GEMMA_LIVE=1 pytest tests/test_gemma_generator.py`.
+67 offline tests, no GPU or network needed. 44 cover the engine: gate concurrency, optimizer remapping, foundry validation and rollback, the orchestrator's retry and checkpoint logic, and the Gemma prompt/extraction code. 23 cover the experiment code on tiny synthetic data: every freezing mode, the replay buffer and fractional budgets, learning-rate re-warming, mixture and gradual-drift phases, order-independent held-out evaluation, growth with generated and size-matched experts, both detectors firing and staying silent, and bit-exact reproducibility. Every test file also runs standalone (`python tests/test_experiments.py`). The live test loads the real model: `NGEN_RUN_GEMMA_LIVE=1 pytest tests/test_gemma_generator.py`.
 
 ### AMD hardware and Docker
 
@@ -155,6 +156,7 @@ docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video --group-ad
 - **One detector.** A loss z-score with a fixed threshold (z > 4 for 3 steps). Other signals (routing entropy, expert load) were logged but not compared.
 - **The replay baseline has no learning-rate re-warming**, which published continual-pretraining recipes add; it already dominates without it.
 - **Gemma's designs had little variety** (nearly all LayerNorm → 256→128 → 128→256), so "LLM-written vs random" was tested on a narrow range of designs.
+- **Grown experts start from a different initialisation** than the model's initial experts (PyTorch's default vs GPT-style std 0.02). All growth variants share it, so they compare fairly with each other; growth-vs-static comparisons include the difference.
 
 **Of the engine**
 
@@ -182,7 +184,7 @@ configs/                     base configs for each method
 results/
   NOTES.md                   every finding with full tables
   figures/                   the ten result figures
-tests/                       64 offline tests + 1 opt-in live Gemma test
+tests/                       67 offline tests + 1 opt-in live Gemma test
 .agents/skills/              usage contracts for the gate, foundry and optimizer remap
 demo.py, resume_demo.py      GPU smoke check; resume the orchestrator demo
 orchestrator_viz.html        animated playback of the AMD-hardware demo run

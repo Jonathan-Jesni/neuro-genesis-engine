@@ -35,13 +35,23 @@ Raw logs are gitignored; they live in the `results*.tar.gz` bundles.
 Replay is task-free: a reservoir sample of all past training windows, no
 domain labels. Signal arms from day 4 on use `confirm_steps=3`.
 
+Two details that apply to every growth run:
+- **Initialisation.** The model's initial experts use GPT-style init (normal,
+  std 0.02, zero bias). Every *grown* expert — template, size-matched or
+  Gemma-written — is built by the foundry with PyTorch's default `nn.Linear`
+  init (uniform; std ≈ 0.036 for the first layer and 0.018 for the second at
+  these sizes, with random biases). Comparisons between growth variants are like
+  for like; comparisons between growth and static runs include this difference.
+- **Statistics.** "±" is the sample standard deviation over seeds (n − 1), in
+  the tables and in the figures' error bars alike.
+
 ## Findings
 
 1. **Task-free shift detection works.** With the 3-consecutive-step rule the
-   loss z-score detector caught 132/132 boundaries across all 66 three-domain
-   runs that used it (with and without freezing and replay, random or
-   Gemma-written experts, 22M and 101M params), always exactly 2 steps late,
-   with zero false triggers (fig 3). Without the rule, 1 of 3
+   loss z-score detector caught 150/150 boundaries across all 75 three-domain
+   runs that used it (with and without freezing, replay and the drift
+   detector, random or Gemma-written experts, 22M and 101M params), always
+   exactly 2 steps late, with zero false triggers (fig 3). Without the rule, 1 of 3
    seeds fired on a noisy batch (z = 4.04) 8 steps early and its 300-step
    cooldown masked the real boundary.
 2. **Growth alone does not reduce forgetting.** Static (4 or 6 experts),
@@ -146,7 +156,10 @@ domain labels. Signal arms from day 4 on use `confirm_steps=3`.
     experts carry all new-domain learning, the full-size template learns new
     domains clearly better (new-domain loss 4.86 vs ~5.10). Answer to the
     original question: LLM-written experts are no better than random ones of
-    the same size; what matters is how much capacity is added.
+    the same size; what matters is how much capacity is added. (Design
+    assignment is `(seed × 2 + growth event) mod 8`, so seeds 4–5 reuse the
+    designs of seeds 0–1, and two of the 8 designs are identical: the 6 seeds
+    cover 7 distinct designs.)
 15. **Detection sensitivity: reliable from a 10% shift, borderline at 5%,
     zero false triggers** (day 8, fig 8). Two-phase runs: pure stories, then
     stories with a share q of code mixed in (or pure stories again as a
