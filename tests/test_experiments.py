@@ -144,6 +144,43 @@ def test_mixture_phase_proportions():
         assert all(bool((row < 200).all()) or bool((row >= 200).all()) for row in rows)
 
 
+def test_heldout_windows_do_not_depend_on_domain_order():
+    from experiments.data import HeldOut, _windows, load_tokens
+    with _TmpDir() as td:
+        root = Path(td)
+        rng = np.random.default_rng(1)
+        for name, n in (("stories", 9_000), ("code", 7_000), ("math", 8_000)):  # distinct lengths
+            for split in ("train", "val"):
+                np.save(root / f"{name}_{split}.npy", rng.integers(0, VOCAB, size=n).astype(np.uint16))
+        # Reference: the original draw-in-config-order algorithm, default order.
+        ref_rng, ref = np.random.default_rng(1234), {}
+        for d in ("stories", "code", "math"):
+            arr = load_tokens(root, d, "val")
+            ref[d] = [_windows(arr, ref_rng.integers(0, len(arr) - SEQ - 1, size=BATCH), SEQ)
+                      for _ in range(3)]
+
+        def same(h: HeldOut, doms) -> bool:
+            return all(torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+                       for d in doms for a, b in zip(h.batches[d], ref[d]))
+
+        assert same(HeldOut(root, ["stories", "code", "math"], 3, BATCH, SEQ), ref)  # past runs reproduce
+        rev = HeldOut(root, ["math", "code", "stories"], 3, BATCH, SEQ)
+        assert same(rev, ref) and list(rev.batches) == ["math", "code", "stories"]
+        assert same(HeldOut(root, ["stories", "code"], 3, BATCH, SEQ), ["stories", "code"])
+        assert same(HeldOut(root, ["code"], 3, BATCH, SEQ), ["code"])
+        del rev
+
+
+def test_repeated_phase_is_not_overwritten():
+    with _TmpDir() as td:
+        root = Path(td)
+        _write_data(root)
+        s = run(_cfg(root, name="rep2", domains=["a", "a"]), seed=0)
+        assert set(s["phase_end"]) == {"a", "a#2"}
+        assert s["final"] == s["phase_end"]["a#2"] != s["phase_end"]["a"]
+        assert s["forgetting"] == {"a": s["final"]["a"] - s["phase_end"]["a"]["a"]}
+
+
 def test_ramp_phase_share_rises_linearly():
     assert parse_phase("ramp:a:b:0.5") == [("a", 0.75), ("b", 0.25)]   # phase-average mix
     assert base_domains(["a", "ramp:a:b:1.0"]) == ["a", "b"]
@@ -324,6 +361,20 @@ def test_signal_detector_stays_silent_without_a_shift():
         run(_cfg(root, name="quiet", arm="signal", confirm_steps=3, domains=["a", "a", "a"]),
             seed=0)
         assert _events(root, "quiet") == []
+
+
+def test_lr_rewarm_restarts_schedule_each_phase():
+    with _TmpDir() as td:
+        root = Path(td)
+        _write_data(root)
+        run(_cfg(root, name="rw", lr_rewarm=True, log_every=1), seed=0)
+        lr = {s["step"]: s["lr"] for s in map(json.loads,
+              (root / "res" / "rw_s0" / "steps.jsonl").read_text().splitlines())}
+        # Phases are 40 steps; warm-up is 5. Each phase starts low again,
+        # peaks after warm-up, and decays by the phase's end.
+        for start in (0, 40, 80):
+            assert lr[start] < lr[start + 5] and lr[start + 39] < lr[start + 5], start
+        assert abs(lr[0] - lr[40]) < 1e-12 and abs(lr[45] - lr[85]) < 1e-12
 
 
 def test_replay_run_reports_its_budget():

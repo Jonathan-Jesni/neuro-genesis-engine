@@ -50,6 +50,11 @@ DEFAULTS: dict[str, Any] = {
     "lr": 1e-3,
     "min_lr_frac": 0.1,
     "warmup_steps": 200,
+    # LR re-warming (the continual-pretraining recipe of Ibrahim et al. 2024):
+    # restart warm-up + cosine decay at the start of every phase instead of one
+    # schedule over the whole run. Uses the TRUE phase boundaries, so it is a
+    # boundary-aware baseline, not a task-free method.
+    "lr_rewarm": False,
     "weight_decay": 0.1,
     "grad_clip": 1.0,
     "log_every": 20,
@@ -134,6 +139,17 @@ def load_config(path: Path, overrides: list[str]) -> dict:
     if cfg["name"] is None:
         cfg["name"] = Path(path).stem
     return cfg
+
+
+def _phase_keys(domains: list[str]) -> list[str]:
+    """Key for each phase's held-out results: its domain spec, with repeats
+    numbered (["stories", "stories"] -> ["stories", "stories#2"]) so a later
+    phase never overwrites an earlier one."""
+    keys, seen = [], {}
+    for d in domains:
+        seen[d] = seen.get(d, 0) + 1
+        keys.append(d if seen[d] == 1 else f"{d}#{seen[d]}")
+    return keys
 
 
 def lr_at(step: int, total: int, cfg: dict) -> float:
@@ -351,6 +367,7 @@ def run(cfg: dict, seed: int) -> dict:
                       cfg["batch_size"], mcfg.seq_len)
     total = stream.total_steps
     boundaries = set(stream.boundaries())
+    phase_keys = _phase_keys(cfg["domains"])
 
     run_name = f"{cfg['name']}_s{seed}"
     run_dir = Path(cfg["results_dir"]) / run_name
@@ -397,132 +414,136 @@ def run(cfg: dict, seed: int) -> dict:
           f"confirm={cfg['confirm_steps']} drift={'on' if drift_det else 'off'} device={device} params={count_params(model)/1e6:.1f}M "
           f"experts/layer={model.num_experts} steps={total} ({steps_per_phase}/phase)", flush=True)
 
-    phase_end: dict[str, dict[str, float]] = {}
-    t0 = time.time()
-    loss_acc = aux_acc = 0.0
-    n_acc = 0
+    try:
+        phase_end: dict[str, dict[str, float]] = {}
+        t0 = time.time()
+        loss_acc = aux_acc = 0.0
+        n_acc = 0
 
-    for b in stream:
-        step = b.step
+        for b in stream:
+            step = b.step
 
-        # ---- growth decisions: BETWEEN steps, no gate lock held ----------
-        grow_reason = None
-        if arm == "oracle" and step in boundaries:
-            grow_reason, n_grow = "oracle_boundary", cfg["oracle_grow"]
-        if grow_reason:
-            for _ in range(n_grow):
-                model.grow(opt, tag=f"S{step}", source=grow_source())
-            n_growth_events += 1
-            freezer.after_growth(model, n_grow, seen_counts, cfg["seen_min_count"])
-            log.write("events", {"step": step, "reason": grow_reason,
-                                 "experts": model.num_experts, "domain": b.domain_id})
-
-        lr = lr_at(step, total, cfg)
-        for g in opt.param_groups:          # includes groups added by growth
-            g["lr"] = lr
-
-        bx, by = b.x, b.y
-        fresh = cfg["batch_size"]
-        n_replay = 0
-        if replay is not None and replay.size > 0:
-            n_replay = replay_rows(n_replay_base, n_replay_rem, replay.rng)
-        if n_replay > 0:
-            fresh = cfg["batch_size"] - n_replay
-            rx, ry = replay.sample(n_replay)
-            bx = torch.cat([b.x[:fresh], rx])
-            by = torch.cat([b.y[:fresh], ry])
-        x, y = bx.to(device, non_blocking=True), by.to(device, non_blocking=True)
-        seen_counts += torch.bincount(x.reshape(-1), minlength=mcfg.vocab_size)
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-            _, loss, aux = model(x, y)
-        opt.zero_grad(set_to_none=True)
-        (loss + aux).backward()
-        if cfg["grad_clip"]:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
-        opt.step()
-        freezer.after_step(model)
-        if replay is not None:
-            replay.add(b.x[:fresh], b.y[:fresh])
-
-        lval = loss.item()
-        loss_acc += lval
-        aux_acc += aux.item()
-        n_acc += 1
-
-        # ---- signal arm: detector sees the loss AFTER the step ------------
-        if detector is not None:
-            spike = detector.update(lval)
-            consec = consec + 1 if spike else 0
-            drift = drift_det.update(lval) if drift_det is not None else None
-            fire_spike = consec >= cfg["confirm_steps"]
-            cooled = step - last_growth >= cfg["cooldown_steps"]
-            if ((fire_spike or drift is not None) and cooled
-                    and model.num_experts < cfg["max_experts"]):
-                for _ in range(cfg["signal_grow"]):
+            # ---- growth decisions: BETWEEN steps, no gate lock held ----------
+            grow_reason = None
+            if arm == "oracle" and step in boundaries:
+                grow_reason, n_grow = "oracle_boundary", cfg["oracle_grow"]
+            if grow_reason:
+                for _ in range(n_grow):
                     model.grow(opt, tag=f"S{step}", source=grow_source())
                 n_growth_events += 1
-                freezer.after_growth(model, cfg["signal_grow"], seen_counts,
-                                     cfg["seen_min_count"])
-                last_growth = step
-                consec = 0
-                # Reset: a sustained shift would otherwise keep every later step
-                # a "spike" (spikes never enter the baseline history).
-                detector = RollingSpikeDetector(**cfg["detector"])
-                if drift_det is not None:
-                    drift_det.reset()
-                log.write("events", {
-                    "step": step, "reason": "loss_spike" if fire_spike else "loss_drift",
-                    "z": spike.z_score if spike else None,
-                    "drift_ratio": drift, "loss": lval,
-                    "experts": model.num_experts, "domain": b.domain_id})
+                freezer.after_growth(model, n_grow, seen_counts, cfg["seen_min_count"])
+                log.write("events", {"step": step, "reason": grow_reason,
+                                     "experts": model.num_experts, "domain": b.domain_id})
 
-        if (step + 1) % cfg["log_every"] == 0:
-            stats = model.routing_stats()
-            log.write("steps", {
-                "step": step, "tokens": (step + 1) * tokens_per_step,
-                "domain": b.domain_id, "loss": loss_acc / n_acc, "aux": aux_acc / n_acc,
-                "lr": lr, "experts": model.num_experts,
-                "entropy_norm": sum(s["entropy_norm"] for s in stats) / len(stats),
-                "load": [s["load"] for s in stats],
-                "elapsed": time.time() - t0,
-            })
-            loss_acc = aux_acc = 0.0
-            n_acc = 0
+            lr = (lr_at(b.phase_step, steps_per_phase, cfg) if cfg["lr_rewarm"]
+                  else lr_at(step, total, cfg))
+            for g in opt.param_groups:          # includes groups added by growth
+                g["lr"] = lr
 
-        is_phase_end = b.phase_step == steps_per_phase - 1
-        if (step + 1) % cfg["eval_every"] == 0 or is_phase_end:
-            ev, route = evaluate(model, heldout, device, amp)
-            log.write("evals", {"step": step, "domain": b.domain_id,
-                                "phase_end": is_phase_end, "experts": model.num_experts,
-                                "loss": ev, "route": route})
-            if is_phase_end:
-                phase_end[cfg["domains"][b.domain_id]] = ev
-            rate = (step + 1) * tokens_per_step / (time.time() - t0)
-            print(f"[{run_name}] step {step+1}/{total} dom={cfg['domains'][b.domain_id]} "
-                  f"experts={model.num_experts} eval="
-                  + " ".join(f"{k}:{v:.3f}" for k, v in ev.items())
-                  + f"  {rate/1e3:.0f}k tok/s", flush=True)
+            bx, by = b.x, b.y
+            fresh = cfg["batch_size"]
+            n_replay = 0
+            if replay is not None and replay.size > 0:
+                n_replay = replay_rows(n_replay_base, n_replay_rem, replay.rng)
+            if n_replay > 0:
+                fresh = cfg["batch_size"] - n_replay
+                rx, ry = replay.sample(n_replay)
+                bx = torch.cat([b.x[:fresh], rx])
+                by = torch.cat([b.y[:fresh], ry])
+            x, y = bx.to(device, non_blocking=True), by.to(device, non_blocking=True)
+            seen_counts += torch.bincount(x.reshape(-1), minlength=mcfg.vocab_size)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                _, loss, aux = model(x, y)
+            opt.zero_grad(set_to_none=True)
+            (loss + aux).backward()
+            if cfg["grad_clip"]:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
+            opt.step()
+            freezer.after_step(model)
+            if replay is not None:
+                replay.add(b.x[:fresh], b.y[:fresh])
 
-    final = phase_end[cfg["domains"][-1]]
-    # Mixture phases have no single held-out set of their own: forgetting is
-    # reported only for pure-domain phases (all of them in non-mixture runs).
-    forgetting = {d: final[d] - phase_end[d][d] for d in cfg["domains"][:-1] if d in final}
-    summary = {
-        "run": run_name, "arm": arm, "seed": seed, "freeze": cfg["freeze"],
-        "replay_frac": cfg["replay_frac"],
-        "expert_source": cfg["expert_source"],
-        "phase_end": phase_end, "final": final,
-        "final_avg": sum(final.values()) / len(final),
-        "forgetting": forgetting,
-        "forgetting_avg": sum(forgetting.values()) / max(1, len(forgetting)),
-        "experts_final": model.num_experts,
-        "params_final": count_params(model),
-        "steps": total, "tokens": total * tokens_per_step,
-        "seconds": round(time.time() - t0, 1),
-        "device": str(torch.cuda.get_device_name(0)) if device.type == "cuda" else "cpu",
-    }
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
-    log.close()
+            lval = loss.item()
+            loss_acc += lval
+            aux_acc += aux.item()
+            n_acc += 1
+
+            # ---- signal arm: detector sees the loss AFTER the step ------------
+            if detector is not None:
+                spike = detector.update(lval)
+                consec = consec + 1 if spike else 0
+                drift = drift_det.update(lval) if drift_det is not None else None
+                fire_spike = consec >= cfg["confirm_steps"]
+                cooled = step - last_growth >= cfg["cooldown_steps"]
+                if ((fire_spike or drift is not None) and cooled
+                        and model.num_experts < cfg["max_experts"]):
+                    for _ in range(cfg["signal_grow"]):
+                        model.grow(opt, tag=f"S{step}", source=grow_source())
+                    n_growth_events += 1
+                    freezer.after_growth(model, cfg["signal_grow"], seen_counts,
+                                         cfg["seen_min_count"])
+                    last_growth = step
+                    consec = 0
+                    # Reset: a sustained shift would otherwise keep every later step
+                    # a "spike" (spikes never enter the baseline history).
+                    detector = RollingSpikeDetector(**cfg["detector"])
+                    if drift_det is not None:
+                        drift_det.reset()
+                    log.write("events", {
+                        "step": step, "reason": "loss_spike" if fire_spike else "loss_drift",
+                        "z": spike.z_score if spike else None,
+                        "drift_ratio": drift, "loss": lval,
+                        "experts": model.num_experts, "domain": b.domain_id})
+
+            if (step + 1) % cfg["log_every"] == 0:
+                stats = model.routing_stats()
+                log.write("steps", {
+                    "step": step, "tokens": (step + 1) * tokens_per_step,
+                    "domain": b.domain_id, "loss": loss_acc / n_acc, "aux": aux_acc / n_acc,
+                    "lr": lr, "experts": model.num_experts,
+                    "entropy_norm": sum(s["entropy_norm"] for s in stats) / len(stats),
+                    "load": [s["load"] for s in stats],
+                    "elapsed": time.time() - t0,
+                })
+                loss_acc = aux_acc = 0.0
+                n_acc = 0
+
+            is_phase_end = b.phase_step == steps_per_phase - 1
+            if (step + 1) % cfg["eval_every"] == 0 or is_phase_end:
+                ev, route = evaluate(model, heldout, device, amp)
+                log.write("evals", {"step": step, "domain": b.domain_id,
+                                    "phase_end": is_phase_end, "experts": model.num_experts,
+                                    "loss": ev, "route": route})
+                if is_phase_end:
+                    phase_end[phase_keys[b.domain_id]] = ev
+                rate = (step + 1) * tokens_per_step / (time.time() - t0)
+                print(f"[{run_name}] step {step+1}/{total} dom={cfg['domains'][b.domain_id]} "
+                      f"experts={model.num_experts} eval="
+                      + " ".join(f"{k}:{v:.3f}" for k, v in ev.items())
+                      + f"  {rate/1e3:.0f}k tok/s", flush=True)
+
+        final = phase_end[phase_keys[-1]]
+        # Forgetting per earlier pure-domain phase (mixture/ramp phases have no
+        # held-out set of their own). Repeated phases ("stories#2") are skipped here:
+        # the first occurrence already measures the drop from its own phase end.
+        forgetting = {d: final[d] - phase_end[d][d] for d in phase_keys[:-1] if d in final}
+        summary = {
+            "run": run_name, "arm": arm, "seed": seed, "freeze": cfg["freeze"],
+            "replay_frac": cfg["replay_frac"],
+            "expert_source": cfg["expert_source"],
+            "phase_end": phase_end, "final": final,
+            "final_avg": sum(final.values()) / len(final),
+            "forgetting": forgetting,
+            "forgetting_avg": sum(forgetting.values()) / max(1, len(forgetting)),
+            "experts_final": model.num_experts,
+            "params_final": count_params(model),
+            "steps": total, "tokens": total * tokens_per_step,
+            "seconds": round(time.time() - t0, 1),
+            "device": str(torch.cuda.get_device_name(0)) if device.type == "cuda" else "cpu",
+        }
+        (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    finally:
+        log.close()   # also on a crash, so file handles never leak
     print(f"[{run_name}] done: final_avg={summary['final_avg']:.3f} "
           f"forgetting_avg={summary['forgetting_avg']:+.3f} experts={model.num_experts} "
           f"({summary['seconds']/60:.1f} min)", flush=True)

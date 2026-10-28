@@ -145,8 +145,21 @@ class DomainStream:
                 step += 1
 
 
+# The order the original stream used. Held-out windows are always drawn in this
+# order so a domain's windows never depend on the order a config lists domains.
+CANONICAL_DOMAINS = ("stories", "code", "math")
+
+
 class HeldOut:
-    """Fixed, deterministic eval windows per domain (same across arms/seeds)."""
+    """Fixed, deterministic eval windows per domain (same across arms/seeds).
+
+    Windows come from ONE rng, so they are drawn in a fixed canonical order —
+    every canonical domain whose val file exists, then any other requested
+    domain in sorted order — and only the requested ones are kept. A domain's
+    windows are therefore the same whichever order (or subset) a run lists, and
+    for the original order (stories, code, math) they are bit-identical to the
+    earlier draw-in-config-order implementation, so past runs reproduce.
+    """
 
     def __init__(
         self,
@@ -158,11 +171,16 @@ class HeldOut:
         seed: int = 1234,
     ) -> None:
         rng = np.random.default_rng(seed)
-        self.batches: dict[str, list[tuple[Tensor, Tensor]]] = {}
-        for d in domains:
+        canonical = [d for d in CANONICAL_DOMAINS
+                     if d in domains or (Path(data_dir) / f"{d}_val.npy").exists()]
+        order = canonical + sorted(d for d in set(domains) if d not in CANONICAL_DOMAINS)
+        drawn: dict[str, list[tuple[Tensor, Tensor]]] = {}
+        for d in order:
             arr = load_tokens(data_dir, d, "val")
             hi = len(arr) - seq_len - 1
-            self.batches[d] = [
+            drawn[d] = [
                 _windows(arr, rng.integers(0, hi, size=batch_size), seq_len)
                 for _ in range(n_batches)
             ]
+        # Keep the caller's order (it decides the order of logged loss dicts).
+        self.batches: dict[str, list[tuple[Tensor, Tensor]]] = {d: drawn[d] for d in domains}

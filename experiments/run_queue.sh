@@ -22,7 +22,9 @@ export PYTHONPATH="${PYTHONPATH:-$PWD}"
 
 total=$(grep -cvE '^\s*(#|$)' "$QUEUE")
 i=0
-while read -r name cfg seed rest; do
+while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line%$''}                    # tolerate CRLF queue files (Windows checkouts)
+    read -r name cfg seed rest <<< "$line"
     [[ -z "${name:-}" || "$name" == \#* ]] && continue
     i=$((i + 1))
     if [[ -f "$RESULTS_DIR/${name}_s${seed}/summary.json" ]]; then
