@@ -17,6 +17,9 @@ Figures:
     sensitivity  detection vs shift size for two-phase mixture runs (day 8)
     drift        training loss for an abrupt switch vs gradual drift (day 9)
 
+Regenerate the published figures 1-10 exactly (fixed arm lists, PAPER_FIGURES):
+    python -m experiments.analyze --paper --results results --out results/figures
+
 Use --arms to restrict every figure to a readable subset, e.g.
     python -m experiments.analyze --arms toy_A toy_D toy_D_seen toy_A_replay --out figs/main
 """
@@ -64,6 +67,12 @@ ARM_COLORS.update({
 })
 DOMAIN_SHADES = ["#f3f4f6", "#e0f2fe", "#fef3c7", "#ede9fe"]
 _FALLBACK = ["#7c3aed", "#db2777", "#0891b2", "#65a30d", "#ea580c", "#4b5563", "#0d9488", "#9333ea"]
+
+
+def _sd(values) -> float:
+    """Sample standard deviation (n-1), matching summarize.py's tables; 0 for n<2."""
+    v = list(values)
+    return float(np.std(v, ddof=1)) if len(v) > 1 else 0.0
 
 
 def arm_color(arm: str) -> str:
@@ -161,7 +170,7 @@ def fig_heldout(runs: list[Run], out: Path) -> None:
                 continue
             xs = sorted(curves)
             mean = np.array([np.mean(curves[x]) for x in xs])
-            sd = np.array([np.std(curves[x]) for x in xs])
+            sd = np.array([_sd(curves[x]) for x in xs])
             c = arm_color(arm)
             ax.plot(xs, mean, color=c, lw=1.8, label=f"{ARM_LABELS.get(arm, arm)} (n={len(rs)})")
             if len(rs) > 1:
@@ -176,19 +185,23 @@ def fig_heldout(runs: list[Run], out: Path) -> None:
     plt.close(fig)
 
 
-def detection_table(runs: list[Run], out: Path, window: int = 100) -> None:
-    """Growth events vs true boundaries. A trigger within `window` steps after a
-    boundary counts as detecting it; any other trigger is a false trigger."""
+def detection_table(runs: list[Run], out: Path) -> None:
+    """Growth triggers vs true boundaries. The first trigger in
+    [boundary, next boundary) detects that boundary, with its delay — this
+    covers both the spike detector (a few steps) and the drift detector (often
+    hundreds of steps into a gradual ramp). Any other trigger — before the first
+    boundary, or a second one within the same phase — is a false trigger."""
     rows = []
     for r in runs:
-        if r.arm != "toy_D" and not any(e["reason"] in ("loss_spike", "loss_drift") for e in r.events):
-            continue
         trig = [e["step"] for e in r.events if e["reason"] in ("loss_spike", "loss_drift")]
+        if r.cfg.get("arm") != "signal" and not trig:
+            continue
         last = r.steps[-1]["step"] if r.steps else 0
         reached = [b for b in r.boundaries if b <= last]
+        ends = r.boundaries[1:] + [r.steps_per_phase * len(r.domains)]
         used, lat = set(), []
-        for b in reached:
-            hit = next((t for t in trig if b <= t < b + window and t not in used), None)
+        for b, end in zip(reached, ends):
+            hit = next((t for t in trig if b <= t < end), None)
             if hit is not None:
                 used.add(hit)
                 lat.append(hit - b)
@@ -204,10 +217,10 @@ def detection_table(runs: list[Run], out: Path, window: int = 100) -> None:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)
-    print("detection (window=%d steps):" % window)
+    print("detection (first trigger in each boundary's phase):")
     for row in rows:
-        print(f"  {row['run']:<12} detected {row['detected']}/{row['boundaries_reached']} "
-              f"latency {row['latencies']}  false {row['false_triggers']}  "
+        print(f"  {row['run']:<20} detected {row['detected']}/{row['boundaries_reached']} "
+              f"delay {row['latencies']}  false {row['false_triggers']}  "
               f"{'' if row['complete'] else '(partial run)'}")
 
 
@@ -234,8 +247,8 @@ def fig_tradeoff(runs: list[Run], out: Path) -> None:
         ys = [r.summary["forgetting_avg"] for r in rs]
         c = arm_color(arm)
         ax.errorbar(np.mean(xs), np.mean(ys),
-                    xerr=np.std(xs) if len(rs) > 1 else None,
-                    yerr=np.std(ys) if len(rs) > 1 else None,
+                    xerr=_sd(xs) if len(rs) > 1 else None,
+                    yerr=_sd(ys) if len(rs) > 1 else None,
                     fmt="o", color=c, ms=7, capsize=3,
                     label=f"{ARM_LABELS.get(arm, arm)} (n={len(rs)})")
     ax.set_xlabel("loss on each new domain when its phase ends\n(lower = learned it better)")
@@ -312,7 +325,7 @@ def fig_budget(runs: list[Run], out: Path) -> None:
         bs = sorted(pts[name])
         for ax, key in zip(axes, ("forgetting_avg", "final_avg")):
             m = [np.mean([s[key] for s in pts[name][b]]) for b in bs]
-            sd = [np.std([s[key] for s in pts[name][b]]) for b in bs]
+            sd = [_sd(s[key] for s in pts[name][b]) for b in bs]
             ax.errorbar([pos[b] for b in bs], m, yerr=sd, color=color, marker="o",
                         ms=5, lw=1.8, capsize=3, label=name)
     for ax, title in zip(axes, ("forgetting of earlier domains", "final average loss (all domains)")):
@@ -355,7 +368,7 @@ def fig_source(runs: list[Run], out: Path) -> None:
                 arm = pattern.format(suffix)
                 v = [x[key] for x in by.get(arm, by.get(SOURCE_FALLBACK.get(arm, ""), []))]
                 m.append(np.mean(v) if v else np.nan)
-                sd.append(np.std(v) if len(v) > 1 else 0.0)
+                sd.append(_sd(v))
                 ns.append(len(v))
             xs = np.arange(len(SOURCE_SETTINGS)) + (j - 1) * width
             bars = ax.bar(xs, m, width, yerr=sd, color=color, capsize=3, label=label)
@@ -504,7 +517,7 @@ def fig_scale(runs: list[Run], out: Path) -> None:
             for suffix, _ in SCALE_ARMS:
                 v = [x[key] for x in by.get(f"{prefix}_{suffix}", [])]
                 m.append(np.mean(v) if v else np.nan)
-                sd.append(np.std(v) if len(v) > 1 else 0.0)
+                sd.append(_sd(v))
             xs = np.arange(len(SCALE_ARMS)) + (j - 0.5) * width
             ax.bar(xs, m, width, yerr=sd, color=color, capsize=3, label=size_label)
         ax.set_xticks(range(len(SCALE_ARMS)), [lab for _, lab in SCALE_ARMS], fontsize=8)
@@ -587,6 +600,54 @@ def fig_leak_scatter(runs: list[Run], out: Path) -> None:
     plt.close(fig)
 
 
+# The exact arm lists behind results/figures/1-10, so the published figures can
+# be regenerated from a results directory with one command (--paper).
+PAPER_FIGURES = [
+    ("1_tradeoff.png", "tradeoff",
+     ["toy_A", "toy_D", "toy_D_fexp", "toy_D_fall", "toy_D_femb", "toy_D_seen",
+      "toy_A_replay", "toy_D_replay", "toy_D_seen_replay", "toy_D_fall_replay"]),
+    ("2_heldout_curves.png", "heldout", ["toy_A", "toy_D", "toy_D_seen", "toy_A_replay"]),
+    ("3_detection.png", "detectplot", ["toy_D_seen"]),
+    ("4_router_leak.png", "leakplot",
+     ["toy_D_fall", "toy_D_fall_k2", "toy_D_fall_k4", "toy_D_fall_k8",
+      "toy_C_fall", "toy_C_fall_k4"]),
+    ("5_replay_budget.png", "budget",
+     ["toy_A", "toy_A_r01", "toy_A_r05", "toy_A_r10", "toy_A_replay",
+      "toy_D", "toy_D_r01", "toy_D_r05", "toy_D_r10", "toy_D_replay",
+      "toy_D_seen", "toy_D_seen_r01", "toy_D_seen_r05", "toy_D_seen_r10", "toy_D_seen_replay"]),
+    ("6_scale.png", "scale",
+     ["toy_A", "toy_D", "toy_A_r05", "toy_D_seen", "big_A", "big_D", "big_A_r05", "big_D_seen"]),
+    ("7_expert_source.png", "source",
+     ["toy_D_tmpl", "toy_D_gen", "toy_D_tmpl128", "toy_D_seen", "toy_D_seen_gen",
+      "toy_D_seen_tmpl128"]),
+    ("8_detection_sensitivity.png", "sensitivity",
+     ["shift_none", "shift_q05", "shift_q10", "shift_q25", "shift_q50"]),
+    ("9_gradual_drift.png", "drift", ["shift_q50", "drift_q50", "drift_q100"]),
+    ("10_drift_detector.png", "drift", ["drift_q100", "dd_drift_q100", "dd_drift_q50"]),
+]
+
+
+def make_paper_figures(results: Path, out: Path) -> None:
+    """Regenerate every published figure (results/figures/1-10) from ``results``."""
+    import shutil
+    import tempfile
+
+    all_runs = load_runs(results)
+    out.mkdir(parents=True, exist_ok=True)
+    for fname, fig, arms in PAPER_FIGURES:
+        runs = [r for r in all_runs if r.arm in set(arms)]
+        missing = sorted(set(arms) - {r.arm for r in runs})
+        if missing:
+            print(f"skip {fname}: no runs for {missing}")
+            continue
+        with tempfile.TemporaryDirectory() as td:
+            FIGURES[fig](runs, Path(td))
+            produced = list(Path(td).glob("*.png"))
+            assert len(produced) == 1, (fname, produced)
+            shutil.copyfile(produced[0], out / fname)
+        print(f"wrote {out / fname}  ({len(runs)} runs)")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Make figures from experiment logs.")
     p.add_argument("--results", type=Path, default=Path("results"))
@@ -597,8 +658,13 @@ def main() -> None:
                             "sensitivity", "drift"])
     p.add_argument("--arms", nargs="+", default=None,
                    help="only include these arms (run-name prefix before _s<seed>)")
+    p.add_argument("--paper", action="store_true",
+                   help="regenerate the published figures 1-10 (fixed arm lists)")
     args = p.parse_args()
     out = args.out or args.results / "figures"
+    if args.paper:
+        make_paper_figures(args.results, out)
+        return
     out.mkdir(parents=True, exist_ok=True)
     runs = load_runs(args.results)
     if args.arms:
@@ -635,6 +701,14 @@ def main() -> None:
     partial = [r.name for r in runs if not r.complete]
     print(f"wrote figures to {out}  ({len(runs)} runs"
           + (f", partial: {', '.join(partial)}" if partial else "") + ")")
+
+
+FIGURES = {
+    "experts": fig_experts, "heldout": fig_heldout, "tradeoff": fig_tradeoff,
+    "leakplot": fig_leak_scatter, "detectplot": fig_detection, "budget": fig_budget,
+    "scale": fig_scale, "source": fig_source, "sensitivity": fig_sensitivity,
+    "drift": fig_drift,
+}
 
 
 if __name__ == "__main__":
