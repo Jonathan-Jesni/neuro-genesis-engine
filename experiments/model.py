@@ -37,22 +37,26 @@ class ModelConfig:
     top_k: int = 2
     gate_loss_coef: float = 1e-2
     dropout: float = 0.0
+    gelu_approx: str = "none"  # "tanh" = GPT-2's gelu_new (for upcycled GPT-2 weights)
 
 
 class ExpertMLP(nn.Module):
     """2-layer GELU MLP. Same architecture as :func:`expert_source` emits."""
 
-    def __init__(self, d_model: int, d_ff: int) -> None:
+    def __init__(self, d_model: int, d_ff: int, gelu_approx: str = "none") -> None:
         super().__init__()
         self.fc1 = nn.Linear(d_model, d_ff)
         self.fc2 = nn.Linear(d_ff, d_model)
+        self.gelu_approx = gelu_approx
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.fc2(F.gelu(self.fc1(x)))
+        return self.fc2(F.gelu(self.fc1(x), approximate=self.gelu_approx))
 
 
-def expert_source(d_model: int, d_ff: int, class_name: str) -> str:
-    """Foundry-compatible source for a new expert (no imports, zero-arg ctor)."""
+def expert_source(d_model: int, d_ff: int, class_name: str, gelu_approx: str = "none") -> str:
+    """Foundry-compatible source for a new expert (no imports, zero-arg ctor).
+    With the default ``gelu_approx`` the source is byte-identical to before."""
+    act = "F.gelu(self.fc1(x))" if gelu_approx == "none" else         f"F.gelu(self.fc1(x), approximate='{gelu_approx}')"
     return f"""
 class {class_name}(nn.Module):
     def __init__(self):
@@ -61,7 +65,7 @@ class {class_name}(nn.Module):
         self.fc2 = nn.Linear({d_ff}, {d_model})
 
     def forward(self, x):
-        return self.fc2(F.gelu(self.fc1(x)))
+        return self.fc2({act})
 """
 
 
@@ -80,7 +84,7 @@ class MoELayer(nn.Module):
             cfg.d_model, cfg.n_experts, k=cfg.top_k, loss_coef=cfg.gate_loss_coef
         )
         self.experts = nn.ModuleList(
-            ExpertMLP(cfg.d_model, cfg.d_ff) for _ in range(cfg.n_experts)
+            ExpertMLP(cfg.d_model, cfg.d_ff, cfg.gelu_approx) for _ in range(cfg.n_experts)
         )
         # Not an nn.Module attribute: the foundry holds references to the gate
         # and expert list, it owns no parameters itself.
@@ -129,7 +133,7 @@ class MoELayer(nn.Module):
         self._grown += 1
         if source is None:
             name = f"GrownExpertL{self.layer_idx}N{self._grown}{tag}"
-            source = expert_source(self.cfg.d_model, self.cfg.d_ff, name)
+            source = expert_source(self.cfg.d_model, self.cfg.d_ff, name, self.cfg.gelu_approx)
         reg = self.foundry.register_expert_from_source(source, optimizer=optimizer)
         return reg.index
 

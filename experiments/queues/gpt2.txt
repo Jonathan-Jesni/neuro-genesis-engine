@@ -1,0 +1,20 @@
+# Pretrained GPT-2 small, upcycled: each block's MLP copied into 4 experts
+# (experiments/upcycle.py; weights file pretrained/gpt2_dense_fp16.pt must be
+# present). The key comparison — normal MoE, growth on detection, 5% replay,
+# growth + seen-token freeze — starting from pretrained weights instead of
+# scratch. 3M tokens per domain (pretrained models need far fewer), lr 2e-4.
+
+gpt2_A       configs/toy_A.yaml       0  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000
+gpt2_D       configs/toy_D.yaml       0  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set confirm_steps=3
+gpt2_A_r05   configs/toy_A.yaml       0  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set replay_frac=0.05
+gpt2_D_seen  configs/toy_D_fall.yaml  0  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set freeze=all_seen_emb --set confirm_steps=3
+
+gpt2_A       configs/toy_A.yaml       1  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000
+gpt2_D       configs/toy_D.yaml       1  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set confirm_steps=3
+gpt2_A_r05   configs/toy_A.yaml       1  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set replay_frac=0.05
+gpt2_D_seen  configs/toy_D_fall.yaml  1  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set freeze=all_seen_emb --set confirm_steps=3
+
+gpt2_A       configs/toy_A.yaml       2  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000
+gpt2_D       configs/toy_D.yaml       2  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set confirm_steps=3
+gpt2_A_r05   configs/toy_A.yaml       2  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set replay_frac=0.05
+gpt2_D_seen  configs/toy_D_fall.yaml  2  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set freeze=all_seen_emb --set confirm_steps=3
