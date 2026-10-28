@@ -181,6 +181,42 @@ def test_repeated_phase_is_not_overwritten():
         assert s["forgetting"] == {"a": s["final"]["a"] - s["phase_end"]["a"]["a"]}
 
 
+def test_upcycle_loader_replicates_dense_mlp_into_every_expert():
+    from experiments.upcycle import load_dense_into_moe
+    torch.manual_seed(0)
+    dense_model = MoEGPT(ModelConfig(**dict(_tiny_model_cfg(), n_experts=1)))  # 1 expert = a dense MLP
+    state = {}
+    for name, p in dense_model.named_parameters():
+        if ".moe.gate." in name:
+            continue
+        state[name.replace(".moe.experts.0.", ".mlp.")] = p.detach().clone()
+    with _TmpDir() as td:
+        path = Path(td) / "dense.pt"
+        torch.save({"state": state, "shape": {}}, path)
+        moe = MoEGPT(ModelConfig(**dict(_tiny_model_cfg(), n_experts=3)))
+        load_dense_into_moe(moe, path)
+        x = torch.randint(0, VOCAB, (2, SEQ))
+        dense_model.eval(), moe.eval()
+        with torch.no_grad():
+            # Identical experts + routing weights that sum to 1 => same function.
+            assert torch.allclose(dense_model(x)[0], moe(x)[0], atol=1e-5)
+        wrong = MoEGPT(ModelConfig(**dict(_tiny_model_cfg(), d_ff=32)))
+        try:
+            load_dense_into_moe(wrong, path)
+            assert False, "shape mismatch must raise"
+        except ValueError:
+            pass
+
+
+def test_scientific_notation_override_is_a_number():
+    from experiments.train import load_config
+    with _TmpDir() as td:
+        cfg_path = Path(td) / "c.yaml"
+        cfg_path.write_text("arm: static\n")
+        c = load_config(cfg_path, ["lr=2e-4", "name=run2e5"])
+        assert c["lr"] == 2e-4 and isinstance(c["lr"], float) and c["name"] == "run2e5"
+
+
 def test_ramp_phase_share_rises_linearly():
     assert parse_phase("ramp:a:b:0.5") == [("a", 0.75), ("b", 0.25)]   # phase-average mix
     assert base_domains(["a", "ramp:a:b:1.0"]) == ["a", "b"]
