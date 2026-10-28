@@ -1,0 +1,15 @@
+# Domain order: the key comparison with the stream reversed
+# (math -> code -> stories).
+
+ord_A        configs/toy_A.yaml       0  --set domains=[math,code,stories]
+ord_D        configs/toy_D.yaml       0  --set confirm_steps=3 --set domains=[math,code,stories]
+ord_A_r05    configs/toy_A.yaml       0  --set replay_frac=0.05 --set domains=[math,code,stories]
+ord_D_seen   configs/toy_D_fall.yaml  0  --set freeze=all_seen_emb --set confirm_steps=3 --set domains=[math,code,stories]
+ord_A        configs/toy_A.yaml       1  --set domains=[math,code,stories]
+ord_D        configs/toy_D.yaml       1  --set confirm_steps=3 --set domains=[math,code,stories]
+ord_A_r05    configs/toy_A.yaml       1  --set replay_frac=0.05 --set domains=[math,code,stories]
+ord_D_seen   configs/toy_D_fall.yaml  1  --set freeze=all_seen_emb --set confirm_steps=3 --set domains=[math,code,stories]
+ord_A        configs/toy_A.yaml       2  --set domains=[math,code,stories]
+ord_D        configs/toy_D.yaml       2  --set confirm_steps=3 --set domains=[math,code,stories]
+ord_A_r05    configs/toy_A.yaml       2  --set replay_frac=0.05 --set domains=[math,code,stories]
+ord_D_seen   configs/toy_D_fall.yaml  2  --set freeze=all_seen_emb --set confirm_steps=3 --set domains=[math,code,stories]

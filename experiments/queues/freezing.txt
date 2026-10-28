@@ -1,0 +1,43 @@
+# Freezing strategies at each growth event: old experts only (fexp), all old
+# weights (fall), all but the token embeddings (femb); and how many experts to
+# add per boundary under freeze-all (k = 2 / 4 / 8). -> NOTES findings 3-6.
+
+toy_C_fall     configs/toy_C_fall.yaml  0
+toy_D_fall     configs/toy_D_fall.yaml  0
+toy_C_fexp     configs/toy_C_fexp.yaml  0
+toy_D_fexp     configs/toy_D_fexp.yaml  0
+toy_C_fall     configs/toy_C_fall.yaml  1
+toy_D_fall     configs/toy_D_fall.yaml  1
+toy_C_fexp     configs/toy_C_fexp.yaml  1
+toy_D_fexp     configs/toy_D_fexp.yaml  1
+toy_C_fall     configs/toy_C_fall.yaml  2
+toy_D_fall     configs/toy_D_fall.yaml  2
+toy_C_fexp     configs/toy_C_fexp.yaml  2
+toy_D_fexp     configs/toy_D_fexp.yaml  2
+toy_D_fall_k4  configs/toy_D_fall.yaml  0  --set signal_grow=4
+toy_D_fall_k8  configs/toy_D_fall.yaml  0  --set signal_grow=8
+toy_D_fall_k2  configs/toy_D_fall.yaml  0  --set signal_grow=2
+toy_C_fall_k4  configs/toy_C_fall.yaml  0  --set oracle_grow=4
+toy_D_fall_k4  configs/toy_D_fall.yaml  1  --set signal_grow=4
+toy_D_fall_k8  configs/toy_D_fall.yaml  1  --set signal_grow=8
+toy_D_fall_k2  configs/toy_D_fall.yaml  1  --set signal_grow=2
+toy_C_fall_k4  configs/toy_C_fall.yaml  1  --set oracle_grow=4
+toy_C_fall     configs/toy_C_fall.yaml  2
+toy_D_fall     configs/toy_D_fall.yaml  2
+toy_D_fall_k4  configs/toy_D_fall.yaml  2  --set signal_grow=4
+toy_D_fall_k8  configs/toy_D_fall.yaml  2  --set signal_grow=8
+toy_D_fall_k2  configs/toy_D_fall.yaml  2  --set signal_grow=2
+toy_C_fall_k4  configs/toy_C_fall.yaml  2  --set oracle_grow=4
+toy_C_fexp     configs/toy_C_fexp.yaml  1
+toy_D_fexp     configs/toy_D_fexp.yaml  1
+toy_C_fexp     configs/toy_C_fexp.yaml  2
+toy_D_fexp     configs/toy_D_fexp.yaml  2
+toy_D_femb     configs/toy_D_fall.yaml  0  --set freeze=all_but_emb
+toy_C_femb     configs/toy_C_fall.yaml  0  --set freeze=all_but_emb
+toy_D_femb_k4  configs/toy_D_fall.yaml  0  --set freeze=all_but_emb --set signal_grow=4
+toy_D_femb     configs/toy_D_fall.yaml  1  --set freeze=all_but_emb
+toy_C_femb     configs/toy_C_fall.yaml  1  --set freeze=all_but_emb
+toy_D_femb_k4  configs/toy_D_fall.yaml  1  --set freeze=all_but_emb --set signal_grow=4
+toy_D_femb     configs/toy_D_fall.yaml  2  --set freeze=all_but_emb
+toy_C_femb     configs/toy_C_fall.yaml  2  --set freeze=all_but_emb
+toy_D_femb_k4  configs/toy_D_fall.yaml  2  --set freeze=all_but_emb --set signal_grow=4

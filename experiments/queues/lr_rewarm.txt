@@ -1,0 +1,13 @@
+# LR re-warming (Ibrahim et al. 2024): restart warm-up + cosine at every new
+# domain (true boundaries), with 0 / 1 / 5% replay. Compare toy_A, toy_A_r01,
+# toy_A_r05 (single schedule).
+
+rw_A         configs/toy_A.yaml       0  --set lr_rewarm=true
+rw_A_r01     configs/toy_A.yaml       0  --set lr_rewarm=true --set replay_frac=0.01
+rw_A_r05     configs/toy_A.yaml       0  --set lr_rewarm=true --set replay_frac=0.05
+rw_A         configs/toy_A.yaml       1  --set lr_rewarm=true
+rw_A_r01     configs/toy_A.yaml       1  --set lr_rewarm=true --set replay_frac=0.01
+rw_A_r05     configs/toy_A.yaml       1  --set lr_rewarm=true --set replay_frac=0.05
+rw_A         configs/toy_A.yaml       2  --set lr_rewarm=true
+rw_A_r01     configs/toy_A.yaml       2  --set lr_rewarm=true --set replay_frac=0.01
+rw_A_r05     configs/toy_A.yaml       2  --set lr_rewarm=true --set replay_frac=0.05

@@ -1,0 +1,16 @@
+# Baselines: normal MoE (4 and 6 experts), growth at the TRUE boundaries
+# (oracle) and growth on detection (1-step spike detector). 22M model,
+# stories -> code -> math, 10M tokens per domain. -> NOTES finding 2.
+
+toy_A          configs/toy_A.yaml       0
+toy_B          configs/toy_B.yaml       0
+toy_C          configs/toy_C.yaml       0
+toy_D          configs/toy_D.yaml       0
+toy_A          configs/toy_A.yaml       1
+toy_B          configs/toy_B.yaml       1
+toy_C          configs/toy_C.yaml       1
+toy_D          configs/toy_D.yaml       1
+toy_A          configs/toy_A.yaml       2
+toy_B          configs/toy_B.yaml       2
+toy_C          configs/toy_C.yaml       2
+toy_D          configs/toy_D.yaml       2
