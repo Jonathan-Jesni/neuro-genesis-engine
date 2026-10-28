@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run a queue of training runs sequentially; resumable and crash-tolerant.
 #
-#     nohup bash experiments/run_queue.sh experiments/queues/day3.txt > logs/queue.log 2>&1 &
+#     nohup bash experiments/run_queue.sh experiments/queues/replay_budget.txt > logs/queue.log 2>&1 &
 #
 # Queue file: one run per line —  <name> <config> <seed> [--set key=value ...]
 # Blank lines and '#' comments are ignored. A run whose
@@ -23,7 +23,8 @@ export PYTHONPATH="${PYTHONPATH:-$PWD}"
 total=$(grep -cvE '^\s*(#|$)' "$QUEUE")
 i=0
 while IFS= read -r line || [[ -n "$line" ]]; do
-    line=${line%$''}                    # tolerate CRLF queue files (Windows checkouts)
+    line=${line%$'
+'}                    # tolerate CRLF queue files (Windows checkouts)
     read -r name cfg seed rest <<< "$line"
     [[ -z "${name:-}" || "$name" == \#* ]] && continue
     i=$((i + 1))

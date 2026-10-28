@@ -68,23 +68,24 @@ python -m experiments.train configs/toy_A.yaml --seed 0 --set replay_frac=0.05 -
 
 Each run writes `results/<name>_s<seed>/` with step logs, held-out evals, growth events and a `summary.json`.
 
-**3. A whole batch** — each file in [`experiments/queues/`](experiments/queues/) is one session's experiment, one run per line. The runner is resumable (finished runs are skipped) and runs one job at a time:
+**3. A whole experiment** — each file in [`experiments/queues/`](experiments/queues/) is one topic, one run per line. The runner is resumable (finished runs are skipped) and runs one job at a time:
 
 ```bash
-bash experiments/run_queue.sh experiments/queues/day4.txt
+bash experiments/run_queue.sh experiments/queues/replay_budget.txt
 ```
 
 | Queue | Finding in `results/NOTES.md` |
 |---|---|
-| configs `toy_A`–`toy_D`, `toy_*_fall`, `toy_*_fexp`, seeds 0–2 | 1–4 (detection, base methods, freezing) |
-| `day3.txt`, `day3b.txt` | 4–6 (experts per boundary, router leak, embeddings) |
-| `day4.txt` | 7–10 (seen-token freezing, 25% replay, reproducibility) |
-| `day5.txt`, `day5b.txt` | 11 (replay budgets) |
-| `day6.txt`, `day6b.txt`, `day7.txt` | 12–13 (101M scale check) |
-| `day7b.txt`, `day7c.txt` | 14 (Gemma-written vs random experts) |
-| `day8.txt` | 15 (detection sensitivity) |
-| `day9.txt` | 16 (gradual drift) |
-| `day10.txt`, `day11.txt`, `day11b.txt` | 17 (drift-aware detector, margin sweep) |
+| `baselines.txt` | 1–2 (detection, growth vs normal MoE) |
+| `freezing.txt` | 3–6 (freezing strategies, experts per boundary, router leak, embeddings) |
+| `seen_freeze_and_replay.txt` | 7–10 (seen-token freezing, 25% replay, reproducibility) |
+| `replay_budget.txt` | 11 (replay budgets) |
+| `scale_101m.txt` | 12–13 (101M scale check) |
+| `generated_vs_random.txt` | 14 (Gemma-written vs random experts) |
+| `detection_sensitivity.txt` | 15 (detection sensitivity) |
+| `gradual_drift.txt` | 16 (gradual drift) |
+| `drift_detector.txt` | 17 (drift-aware detector, margin sweep) |
+| `domain_order.txt`, `lr_rewarm.txt`, `gpt2.txt` | robustness checks: domain order, LR re-warming, pretrained GPT-2 (results pending) |
 
 **4. Tables and figures:**
 
@@ -125,10 +126,10 @@ A 300-step run on a synthetic regression task that injects an out-of-distributio
 ### Tests
 
 ```bash
-pytest tests/ -v        # 67 passed, 1 skipped (the opt-in live Gemma test)
+pytest tests/ -v        # 69 passed, 1 skipped (the opt-in live Gemma test)
 ```
 
-67 offline tests, no GPU or network needed. 44 cover the engine: gate concurrency, optimizer remapping, foundry validation and rollback, the orchestrator's retry and checkpoint logic, and the Gemma prompt/extraction code. 23 cover the experiment code on tiny synthetic data: every freezing mode, the replay buffer and fractional budgets, learning-rate re-warming, mixture and gradual-drift phases, order-independent held-out evaluation, growth with generated and size-matched experts, both detectors firing and staying silent, and bit-exact reproducibility. Every test file also runs standalone (`python tests/test_experiments.py`). The live test loads the real model: `NGEN_RUN_GEMMA_LIVE=1 pytest tests/test_gemma_generator.py`.
+69 offline tests, no GPU or network needed. 44 cover the engine: gate concurrency, optimizer remapping, foundry validation and rollback, the orchestrator's retry and checkpoint logic, and the Gemma prompt/extraction code. 25 cover the experiment code on tiny synthetic data: every freezing mode, the replay buffer and fractional budgets, learning-rate re-warming, mixture and gradual-drift phases, order-independent held-out evaluation, loading pretrained GPT-2 weights into the experts, growth with generated and size-matched experts, both detectors firing and staying silent, and bit-exact reproducibility. Every test file also runs standalone (`python tests/test_experiments.py`). The live test loads the real model: `NGEN_RUN_GEMMA_LIVE=1 pytest tests/test_gemma_generator.py`.
 
 ### AMD hardware and Docker
 
@@ -176,15 +177,16 @@ experiments/
   model.py                   small MoE GPT with live expert growth
   train.py                   one run: growth, freezing, replay, expert sources, logging
   run_queue.sh               resumable sequential runner for a queue file
-  queues/                    one file per experiment session (day3 ... day11)
+  queues/                    one file per experiment topic (baselines.txt, replay_budget.txt, ...)
   summarize.py, analyze.py   results table and figures
   gen_experts.py             pre-generate Gemma-written expert designs
+  upcycle.py                 start from pretrained GPT-2: convert weights, copy each MLP into every expert
   generated_experts/         the designs used in the generated-vs-random runs
 configs/                     base configs for each method
 results/
   NOTES.md                   every finding with full tables
   figures/                   the ten result figures
-tests/                       67 offline tests + 1 opt-in live Gemma test
+tests/                       69 offline tests + 1 opt-in live Gemma test
 .agents/skills/              usage contracts for the gate, foundry and optimizer remap
 demo.py, resume_demo.py      GPU smoke check; resume the orchestrator demo
 orchestrator_viz.html        animated playback of the AMD-hardware demo run

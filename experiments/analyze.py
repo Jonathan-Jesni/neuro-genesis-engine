@@ -14,8 +14,8 @@ Figures:
     budget       forgetting and final loss vs replay budget, per method family
     scale        same four methods at 22M vs 101M params (toy_ vs big_ arms)
     source       generated (Gemma) vs random-init new experts, size-matched control
-    sensitivity  detection vs shift size for two-phase mixture runs (day 8)
-    drift        training loss for an abrupt switch vs gradual drift (day 9)
+    sensitivity  detection vs shift size for two-phase mixture runs (detection_sensitivity.txt)
+    drift        training loss for an abrupt switch vs gradual drift (gradual_drift.txt)
 
 Regenerate the published figures 1-10 exactly (fixed arm lists, PAPER_FIGURES):
     python -m experiments.analyze --paper --results results --out results/figures
@@ -348,7 +348,7 @@ SOURCE_ARMS = [("tmpl", "Random init,\nfull size (526k)", "#9ca3af"),
                ("gen", "Gemma-written\n(~66k)", "#7c3aed"),
                ("tmpl128", "Random init,\nsame size (66k)", "#c4b5fd")]
 SOURCE_SETTINGS = [("toy_D_{}", "no freezing"), ("toy_D_seen_{}", "seen-token freezing")]
-SOURCE_FALLBACK = {"toy_D_seen_tmpl": "toy_D_seen"}   # day-4 arm = full-size template
+SOURCE_FALLBACK = {"toy_D_seen_tmpl": "toy_D_seen"}   # seen_freeze_and_replay arm = full-size template
 
 
 def fig_source(runs: list[Run], out: Path) -> None:

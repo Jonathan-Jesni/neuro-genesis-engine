@@ -33,7 +33,8 @@ Raw logs are gitignored; they live in the `results*.tar.gz` bundles.
 | `toy_D_fall_replay` | D + freeze all + 25% replay | 5.358 ± 0.038 | 0.081 ± 0.022 |
 
 Replay is task-free: a reservoir sample of all past training windows, no
-domain labels. Signal arms from day 4 on use `confirm_steps=3`.
+domain labels. Signal arms use `confirm_steps=3` from `seen_freeze_and_replay.txt` on
+(the baselines and freezing runs used 1).
 
 Two details that apply to every growth run:
 - **Initialisation.** The model's initial experts use GPT-style init (normal,
@@ -84,9 +85,9 @@ Two details that apply to every growth run:
    (seen-freeze: 48% → 30%).
 9. **Task-free ≈ oracle** in every protection setting (e.g. seen-freeze 1.066
    vs 1.058; freeze-all 0.958 vs 1.001).
-10. **Bit-exact reproducibility** on the W7900D: `toy_A_repro` (re-run of day-1
-    `toy_A_s0` on day 4, new container) reproduced 4.343 / 1.518 exactly.
-11. **Growth has no useful regime at any replay budget** (day 5, fig 5).
+10. **Bit-exact reproducibility** on the W7900D: `toy_A_repro` (re-run of the baseline
+    `toy_A_s0` weeks later, in a new container) reproduced 4.343 / 1.518 exactly.
+11. **Growth has no useful regime at any replay budget** (`replay_budget.txt`, fig 5).
     Forgetting / final avg loss, mean of 3 seeds:
 
     | Replay | Normal MoE | Grow | Grow + seen-token freeze |
@@ -103,7 +104,7 @@ Two details that apply to every growth run:
     costs so much new-domain learning (new-domain loss ~4.86 vs ~3.77) that its
     final loss is worse at every budget. Router leak falls with replay for both
     growth arms (plain growth 22% → 9%, seen-freeze 41% → 30% from 1% to 25%).
-12. **The conclusions hold at 4.5× the model size** (day 6, fig 6). Same
+12. **The conclusions hold at 4.5× the model size** (`scale_101m.txt`, fig 6). Same
     stream and settings with d_model 512, 8 layers, expert width 2048 (101.5M
     params vs 22.4M). Forgetting / final avg loss, 3 seeds:
 
@@ -119,7 +120,7 @@ Two details that apply to every growth run:
     better with size — 44% less forgetting than the normal MoE (29% at 22M) and
     a smaller final-loss penalty (+0.30 vs +0.44). With two sizes this is a
     trend to state carefully, not a scaling law.
-13. **No growth combination beats plain replay at 101M either** (days 6b–7).
+13. **No growth combination beats plain replay at 101M either** (`scale_101m.txt`).
     Forgetting / final avg loss, 3 seeds:
 
     | Replay | Normal MoE | Grow + seen-token freeze |
@@ -132,13 +133,13 @@ Two details that apply to every growth run:
     size), but its final loss is ~0.65–0.7 worse at both budgets: with replay
     already protecting old domains, freezing mostly costs new learning.
 14. **LLM-generated experts perform the same as random ones of the same size**
-    (day 7, fig 7). Gemma-2-2b-it, given the foundry contract and the real
+    (`generated_vs_random.txt`, fig 7). Gemma-2-2b-it, given the foundry contract and the real
     failure context, wrote 8 designs in 14 tries (all valid on the first
     attempt) — but almost all the same block: LayerNorm → Linear 256→128 →
     activation → Linear 128→256 (~66k params; one design used width 256).
     That is ~8× smaller than the 526k-param template, so a size-matched
     random-init template (hidden 128) is the control. Growth on detection,
-    22M model, forgetting / final avg loss (no freezing: 6 seeds, days 7 + 7c;
+    22M model, forgetting / final avg loss (no freezing: 6 seeds;
     seen-token freezing: 3 seeds):
 
     | New expert | No freezing (n = 6) | Seen-token freezing (n = 3) |
@@ -161,7 +162,7 @@ Two details that apply to every growth run:
     designs of seeds 0–1, and two of the 8 designs are identical: the 6 seeds
     cover 7 distinct designs.)
 15. **Detection sensitivity: reliable from a 10% shift, borderline at 5%,
-    zero false triggers** (day 8, fig 8). Two-phase runs: pure stories, then
+    zero false triggers** (`detection_sensitivity.txt`, fig 8). Two-phase runs: pure stories, then
     stories with a share q of code mixed in (or pure stories again as a
     no-shift control); 3 seeds each, same detector (z > 4 for 3 consecutive
     steps). Switch at step 1220:
@@ -181,14 +182,14 @@ Two details that apply to every growth run:
     (0 false triggers in 15 runs × 2440 steps). Together with finding 1: the
     detector is reliable for shifts that move the loss by ≳0.2 nats; smaller
     shifts would need a lower threshold.
-16. **Gradual drift is never detected** (day 9, fig 9). Same two-phase setup,
+16. **Gradual drift is never detected** (`gradual_drift.txt`, fig 9). Same two-phase setup,
     but phase 2's code share rises *linearly* from 0 to q_max over its 1220
     steps (`ramp:stories:code:<q_max>`), 3 seeds each:
 
     | Phase 2 | Detected | Training loss, end of phase 2 vs end of phase 1 |
     |---|---|---|
-    | abrupt 25% code (day 8) | 3/3, 2–5 steps | jump of +0.59 at the switch |
-    | abrupt 50% code (day 8) | 3/3, 2 steps | jump of +1.15 at the switch |
+    | abrupt 25% code (finding 15) | 3/3, 2–5 steps | jump of +0.59 at the switch |
+    | abrupt 50% code (finding 15) | 3/3, 2 steps | jump of +1.15 at the switch |
     | drift to 25% | 0/3 | +0.03 |
     | drift to 50% | 0/3 | +0.23 |
     | drift to 100% | 0/3 | +0.49 |
@@ -200,7 +201,7 @@ Two details that apply to every growth run:
     rate*, not slow accumulation; catching drift would need a long-horizon
     reference (e.g. a frozen baseline window or held-out-loss trend).
 17. **A long-horizon drift detector catches fast drift at zero cost to
-    everything else** (day 10, fig 10). `DriftDetector` runs alongside the
+    everything else** (`drift_detector.txt`, fig 10). `DriftDetector` runs alongside the
     unchanged spike detector: it keeps an EMA of the loss (α = 0.02) and that
     EMA's lowest value since the last growth, and fires when the EMA stays
     more than 10% above it for 20 steps (200-step warm-up after each reset).
@@ -212,7 +213,7 @@ Two details that apply to every growth run:
     | drift to 50% code | 2/3, drift signal | 1111–1215 steps in, at 46–50% code |
     | drift to 25% code | 0/3 | (loss rises only ~1%) |
     | no shift | 0/3 | no false alarms |
-    | abrupt 10% switch | 3/3, spike signal | steps 1225 / 1230 / 1223 — identical to day 8 |
+    | abrupt 10% switch | 3/3, spike signal | steps 1225 / 1230 / 1223 — identical to finding 15 |
     | normal 3-domain run | 2 growths each, spike signal | 1222 and 2442 — identical to before |
 
     The drift signal never fired in the abrupt or normal runs, which are
@@ -222,7 +223,7 @@ Two details that apply to every growth run:
     changed, a half-speed drift only near the end of the phase, and a small
     drift never.
 
-    **Margin sweep** (days 11 and 11b, 3 seeds each; margin 2% / 5% / 10% / 15%):
+    **Margin sweep** (3 seeds each; margin 2% / 5% / 10% / 15%):
 
     | Margin | drift to 25% | drift to 50% | drift to 100% | no shift | normal 3-domain run |
     |---|---|---|---|---|---|
