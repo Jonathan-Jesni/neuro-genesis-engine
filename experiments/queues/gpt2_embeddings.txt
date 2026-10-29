@@ -1,0 +1,11 @@
+# Why seen-token freezing failed on pretrained GPT-2 (finding 20): freeze all
+# old weights with ALL embeddings frozen (fall) or ALL trainable (femb), vs
+# only rarely-seen rows trainable (gpt2_D_seen). If trainable pretrained
+# embedding rows are the leak, stories forgetting should order fall < seen < femb.
+
+gpt2_D_fall      configs/toy_D_fall.yaml  0  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set confirm_steps=3
+gpt2_D_femb      configs/toy_D_fall.yaml  0  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set freeze=all_but_emb --set confirm_steps=3
+gpt2_D_fall      configs/toy_D_fall.yaml  1  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set confirm_steps=3
+gpt2_D_femb      configs/toy_D_fall.yaml  1  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set freeze=all_but_emb --set confirm_steps=3
+gpt2_D_fall      configs/toy_D_fall.yaml  2  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set confirm_steps=3
+gpt2_D_femb      configs/toy_D_fall.yaml  2  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set freeze=all_but_emb --set confirm_steps=3

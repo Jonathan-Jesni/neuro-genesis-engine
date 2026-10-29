@@ -124,17 +124,36 @@ class MoELayer(nn.Module):
         return out.reshape(shape), g.aux_loss
 
     def grow(self, optimizer: Optional[torch.optim.Optimizer], tag: str,
-             source: Optional[str] = None) -> int:
+             source: Optional[str] = None, init: str = "default") -> int:
         """Register one new expert through the foundry. Returns its index.
 
         ``source`` overrides the default template MLP (e.g. an LLM-generated
         design); it goes through the same foundry validation either way.
+        ``init`` re-initialises a template expert after registration, in place
+        (the optimizer already holds these Parameter objects): "default" keeps
+        PyTorch's init, "gpt" uses the initial experts' normal(0.02) / zero
+        bias, "copy" copies the busiest expert of the last forward pass.
         """
+        if init != "default" and source is not None:
+            raise ValueError(f"init={init!r} applies to template experts only")
+        load = self.last_stats.get("load") or [1.0]
+        busiest = max(range(len(load)), key=load.__getitem__)
         self._grown += 1
         if source is None:
             name = f"GrownExpertL{self.layer_idx}N{self._grown}{tag}"
             source = expert_source(self.cfg.d_model, self.cfg.d_ff, name, self.cfg.gelu_approx)
         reg = self.foundry.register_expert_from_source(source, optimizer=optimizer)
+        new = self.experts[reg.index]
+        with torch.no_grad():
+            if init == "gpt":
+                for m in new.modules():
+                    if isinstance(m, nn.Linear):
+                        nn.init.normal_(m.weight, std=0.02)
+                        nn.init.zeros_(m.bias)
+            elif init == "copy":
+                src = self.experts[busiest]
+                for p_new, p_src in zip(new.parameters(), src.parameters(), strict=True):
+                    p_new.copy_(p_src)
         return reg.index
 
 
@@ -206,14 +225,14 @@ class MoEGPT(nn.Module):
         return logits, loss, aux_total
 
     def grow(self, optimizer: Optional[torch.optim.Optimizer], tag: str = "",
-             source: Optional[str] = None) -> None:
+             source: Optional[str] = None, init: str = "default") -> None:
         """Add one expert to every MoE layer (transactional per layer).
 
         Must NOT be called while any gate's ``expand_lock`` is held (the foundry
         re-acquires it). Call between train steps only.
         """
         for layer in self.moe_layers:
-            layer.grow(optimizer, tag, source)
+            layer.grow(optimizer, tag, source, init)
 
     def routing_stats(self) -> list[dict]:
         return [layer.last_stats for layer in self.moe_layers]

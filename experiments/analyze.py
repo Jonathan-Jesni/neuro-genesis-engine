@@ -17,7 +17,7 @@ Figures:
     sensitivity  detection vs shift size for two-phase mixture runs (detection_sensitivity.txt)
     drift        training loss for an abrupt switch vs gradual drift (gradual_drift.txt)
 
-Regenerate the published figures 1-10 exactly (fixed arm lists, PAPER_FIGURES):
+Regenerate the published figures 1-11 exactly (fixed arm lists, PAPER_FIGURES):
     python -m experiments.analyze --paper --results results --out results/figures
 
 Use --arms to restrict every figure to a readable subset, e.g.
@@ -140,7 +140,7 @@ def fig_experts(runs: list[Run], out: Path) -> None:
         seen.add(r.arm)
         ax.step(xs, ys, where="post", color=c, lw=1.8, alpha=0.85, label=lab)
         for e in r.events:
-            ax.plot(e["step"], e["experts"], marker="v" if e["reason"] in ("loss_spike", "loss_drift") else "o",
+            ax.plot(e["step"], e["experts"], marker="v" if e["reason"] in ("loss_spike", "loss_drift", "loss_drop") else "o",
                     color=c, ms=6, zorder=5)
     ax.set_xlabel("training step")
     ax.set_ylabel("experts per layer")
@@ -193,7 +193,7 @@ def detection_table(runs: list[Run], out: Path) -> None:
     boundary, or a second one within the same phase — is a false trigger."""
     rows = []
     for r in runs:
-        trig = [e["step"] for e in r.events if e["reason"] in ("loss_spike", "loss_drift")]
+        trig = [e["step"] for e in r.events if e["reason"] in ("loss_spike", "loss_drift", "loss_drop")]
         if r.cfg.get("arm") != "signal" and not trig:
             continue
         last = r.steps[-1]["step"] if r.steps else 0
@@ -281,17 +281,20 @@ def leak_table(runs: list[Run], out: Path) -> None:
         rows.append(row)
     if not rows:
         return
+    # runs with different domain orders have different leak_* columns
+    fields = list(dict.fromkeys(k for row in rows for k in row))
     with open(out / "leak.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         w.writerows(rows)
-    keys = [k for k in rows[0] if k.startswith("leak_")]
+    keys = [k for k in fields if k.startswith("leak_")]
     print("router leak at end of run (share of old-domain routing to later-born experts):")
     g: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         g[row["arm"]].append(row)
     for arm, rs in sorted(g.items()):
-        cells = "  ".join(f"{k[5:]}={np.mean([x[k] for x in rs]):.2f}" for k in keys)
+        cells = "  ".join(f"{k[5:]}={np.mean([x[k] for x in rs]):.2f}" for k in keys
+                          if all(k in x for x in rs))
         print(f"  {arm:<16} n={len(rs)}  {cells}")
 
 
@@ -342,6 +345,13 @@ def fig_budget(runs: list[Run], out: Path) -> None:
 SCALE_ARMS = [("A", "Normal MoE"), ("D", "Grow on\ndetection"),
               ("A_r05", "Normal MoE\n+ 5% replay"), ("D_seen", "Grow + freeze\nseen tokens")]
 SCALE_SIZES = [("toy", "22M params", "#93c5fd"), ("big", "101M params", "#1d4ed8")]
+
+# Robustness: each method relative to the normal MoE (<prefix>_A) of the same setting.
+ROBUST_SETTINGS = [("toy", "22M", "#93c5fd"), ("big", "101M", "#1d4ed8"),
+                   ("ord", "22M, reversed order", "#f59e0b"),
+                   ("gpt2", "GPT-2 (pretrained)", "#7c3aed")]
+ROBUST_ARMS = [("D", "Grow on\ndetection"), ("A_r05", "Normal MoE\n+ 5% replay"),
+               ("D_seen", "Grow + seen-\ntoken freeze")]
 
 
 SOURCE_ARMS = [("tmpl", "Random init,\nfull size (526k)", "#9ca3af"),
@@ -405,7 +415,7 @@ def fig_sensitivity(runs: list[Run], out: Path) -> None:
     for r in rs:
         pre = [x["loss"] for x in r.steps if b - 100 <= x["step"] < b]
         post = [x["loss"] for x in r.steps if b <= x["step"] < b + 100]
-        trig = [e["step"] for e in r.events if e["reason"] in ("loss_spike", "loss_drift")]
+        trig = [e["step"] for e in r.events if e["reason"] in ("loss_spike", "loss_drift", "loss_drop")]
         hit = next((t for t in trig if b <= t < b + 300), None)
         rows.append((_shift_share(r), np.mean(post) - np.mean(pre), hit - b if hit else None,
                      len([t for t in trig if t != hit])))
@@ -482,7 +492,7 @@ def fig_drift(runs: list[Run], out: Path) -> None:
                     curves[x["step"]].append(x["loss"])
         xs = sorted(curves)
         ys = [np.mean(curves[x]) for x in xs]
-        n_fired = sum(1 for r in rs if any(e["reason"] in ("loss_spike", "loss_drift") for e in r.events))
+        n_fired = sum(1 for r in rs if any(e["reason"] in ("loss_spike", "loss_drift", "loss_drop") for e in r.events))
         ax.plot(xs, ys, color=color, ls=ls, lw=1.6,
                 label=f"{label}: detected in {n_fired}/{len(rs)} runs")
         for r in rs:
@@ -527,6 +537,43 @@ def fig_scale(runs: list[Run], out: Path) -> None:
     axes[0].legend(frameon=False, fontsize=8)
     fig.tight_layout()
     fig.savefig(out / "scale.png", dpi=160)
+    plt.close(fig)
+
+
+def fig_robustness(runs: list[Run], out: Path) -> None:
+    """Each method against the normal MoE of the same setting (model size,
+    domain order, pretrained start): forgetting as a % change, final loss as a
+    difference. Paired by seed; bars are mean +- std of the per-seed values."""
+    by: dict[str, dict[int, dict]] = defaultdict(dict)
+    for r in runs:
+        if r.complete:
+            by[r.arm][r.seed] = r.summary
+    fig, axes = plt.subplots(1, 2, figsize=(11, 3.9))
+    width = 0.8 / len(ROBUST_SETTINGS)
+    for ax, key, title in zip(
+            axes, ("forgetting_avg", "final_avg"),
+            ("forgetting vs normal MoE (%)", "final avg loss minus normal MoE")):
+        for j, (prefix, label, color) in enumerate(ROBUST_SETTINGS):
+            base = by.get(f"{prefix}_A", {})
+            m, sd = [], []
+            for suffix, _ in ROBUST_ARMS:
+                arm = by.get(f"{prefix}_{suffix}", {})
+                seeds = sorted(set(arm) & set(base))
+                if key == "forgetting_avg":
+                    v = [100 * (arm[s][key] / base[s][key] - 1) for s in seeds]
+                else:
+                    v = [arm[s][key] - base[s][key] for s in seeds]
+                m.append(np.mean(v) if v else np.nan)
+                sd.append(_sd(v))
+            xs = np.arange(len(ROBUST_ARMS)) + (j - (len(ROBUST_SETTINGS) - 1) / 2) * width
+            ax.bar(xs, m, width, yerr=sd, color=color, capsize=2, label=label)
+        ax.axhline(0, color="#374151", lw=0.8)
+        ax.set_xticks(range(len(ROBUST_ARMS)), [lab for _, lab in ROBUST_ARMS], fontsize=8)
+        ax.set_title(title + "  (below 0 = better)", fontsize=10)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[0].legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out / "robustness.png", dpi=160)
     plt.close(fig)
 
 
@@ -600,7 +647,7 @@ def fig_leak_scatter(runs: list[Run], out: Path) -> None:
     plt.close(fig)
 
 
-# The exact arm lists behind results/figures/1-10, so the published figures can
+# The exact arm lists behind results/figures/1-11, so the published figures can
 # be regenerated from a results directory with one command (--paper).
 PAPER_FIGURES = [
     ("1_tradeoff.png", "tradeoff",
@@ -624,11 +671,13 @@ PAPER_FIGURES = [
      ["shift_none", "shift_q05", "shift_q10", "shift_q25", "shift_q50"]),
     ("9_gradual_drift.png", "drift", ["shift_q50", "drift_q50", "drift_q100"]),
     ("10_drift_detector.png", "drift", ["drift_q100", "dd_drift_q100", "dd_drift_q50"]),
+    ("11_robustness.png", "robustness",
+     [f"{p}_{a}" for p, _, _ in ROBUST_SETTINGS for a in ("A", "D", "A_r05", "D_seen")]),
 ]
 
 
 def make_paper_figures(results: Path, out: Path) -> None:
-    """Regenerate every published figure (results/figures/1-10) from ``results``."""
+    """Regenerate every published figure (results/figures/1-11) from ``results``."""
     import shutil
     import tempfile
 
@@ -655,11 +704,11 @@ def main() -> None:
     p.add_argument("--fig", nargs="+", default=["all"],
                    choices=["all", "experts", "heldout", "detection", "tradeoff", "leak",
                             "leakplot", "detectplot", "budget", "scale", "source",
-                            "sensitivity", "drift"])
+                            "sensitivity", "drift", "robustness"])
     p.add_argument("--arms", nargs="+", default=None,
                    help="only include these arms (run-name prefix before _s<seed>)")
     p.add_argument("--paper", action="store_true",
-                   help="regenerate the published figures 1-10 (fixed arm lists)")
+                   help="regenerate the published figures 1-11 (fixed arm lists)")
     args = p.parse_args()
     out = args.out or args.results / "figures"
     if args.paper:
@@ -698,6 +747,8 @@ def main() -> None:
         fig_sensitivity(runs, out)
     if every or "drift" in want:
         fig_drift(runs, out)
+    if every or "robustness" in want:
+        fig_robustness(runs, out)
     partial = [r.name for r in runs if not r.complete]
     print(f"wrote figures to {out}  ({len(runs)} runs"
           + (f", partial: {', '.join(partial)}" if partial else "") + ")")
@@ -707,7 +758,7 @@ FIGURES = {
     "experts": fig_experts, "heldout": fig_heldout, "tradeoff": fig_tradeoff,
     "leakplot": fig_leak_scatter, "detectplot": fig_detection, "budget": fig_budget,
     "scale": fig_scale, "source": fig_source, "sensitivity": fig_sensitivity,
-    "drift": fig_drift,
+    "drift": fig_drift, "robustness": fig_robustness,
 }
 
 

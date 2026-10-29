@@ -52,7 +52,9 @@ Two details that apply to every growth run:
    loss z-score detector caught 150/150 boundaries across all 75 three-domain
    runs that used it (with and without freezing, replay and the drift
    detector, random or Gemma-written experts, 22M and 101M params), always
-   exactly 2 steps late, with zero false triggers (fig 3). Without the rule, 1 of 3
+   exactly 2 steps late, with zero false triggers (fig 3). The 6 pretrained
+   GPT-2 growth runs add 12/12 more (finding 20). The one exception is a shift
+   that *lowers* the loss, which a spike detector cannot see (finding 18). Without the rule, 1 of 3
    seeds fired on a noisy batch (z = 4.04) 8 steps early and its 300-step
    cooldown masked the real boundary.
 2. **Growth alone does not reduce forgetting.** Static (4 or 6 experts),
@@ -240,6 +242,88 @@ Two details that apply to every growth run:
     The margin at which false alarms start was not reached (below 2% is
     untested) — over 2–10% the detector is safe in this setup, and tighter
     is better.
+18. **Reversing the domain order changes the sizes, not the conclusions**
+    (`domain_order.txt`, fig 11). The same 22M setup with the stream reversed
+    (math → code → stories). Forgetting / final avg loss, 3 seeds:
+
+    | Run | Reversed order | Normal order |
+    |---|---|---|
+    | Normal MoE | 2.711 ± 0.099 / 5.238 ± 0.080 | 1.508 / 4.337 |
+    | Grow on detection | 2.823 ± 0.107 / 5.309 ± 0.083 | 1.534 / 4.353 |
+    | Normal MoE + 5% replay | **0.504 ± 0.008 / 3.777 ± 0.006** | **0.373 / 3.585** |
+    | Grow + seen-token freeze | 1.237 ± 0.062 / 4.710 ± 0.059 | 1.066 / 4.774 |
+
+    - Forgetting is ~1.8× larger. Ending on easy stories text overwrites math
+      (+2.48) and code (+2.94).
+    - Growth is worse than the normal MoE in every seed (+0.10 to +0.14
+      forgetting).
+    - 5% replay removes 81% of the forgetting and is again clearly best.
+    - New in this order: **seen-token freezing beats the normal MoE on final
+      loss** (−0.53). The average is dominated by the two forgotten domains,
+      which it protects (final math 6.77 vs 7.64, code 3.34 vs 5.42), at the
+      cost of learning stories (4.02 vs 2.66). Its router leak is 32–37%. So
+      whether seen-token freezing pays off depends on the order.
+    - **Detection caught only 1 of 2 boundaries, in all 6 growth runs.**
+      Code → stories was caught 2 steps late as usual; math → code was never
+      caught. After the math phase the model's code loss is already *lower*
+      than its math loss (4.32 vs 5.15; open-web-math is full of LaTeX and
+      code-like text), so the switch makes the training loss fall. A loss-spike
+      detector only sees shifts that make the data look harder. There were
+      still no false triggers.
+19. **LR re-warming at each domain makes forgetting worse at every replay
+    budget** (`lr_rewarm.txt`). The warm-up + cosine schedule restarts at each
+    true boundary (as in Ibrahim et al. 2024), normal MoE, 3 seeds.
+    Forgetting / final avg loss:
+
+    | Replay | Re-warm per domain | One schedule (main runs) |
+    |---|---|---|
+    | 0% | 1.630 ± 0.011 / 4.368 ± 0.003 | 1.508 ± 0.010 / 4.337 ± 0.007 |
+    | 1% | 0.907 ± 0.009 / 3.890 ± 0.011 | 0.699 ± 0.014 / 3.795 ± 0.012 |
+    | 5% | 0.544 ± 0.002 / 3.652 ± 0.004 | 0.373 ± 0.012 / 3.585 ± 0.007 |
+
+    - Re-warming adds 0.12 / 0.21 / 0.17 forgetting and is worse in every seed.
+    - It does learn the last domain better (math 4.69 vs 4.90), but loses more
+      on stories and code than it gains.
+    - With one schedule, the later domains are trained at a lower LR, which
+      protects the earlier ones. So the main replay baseline was not
+      handicapped by skipping re-warming.
+    - Replay still cuts forgetting by two thirds under re-warming.
+20. **The conclusions hold when starting from pretrained GPT-2** (`gpt2.txt`,
+    fig 11).
+    - Setup: GPT-2 small (124M) upcycled into an MoE. Each layer's MLP is
+      copied into 4 experts and a fresh top-2 router is added (294M params
+      total).
+    - Training: lr 2e-4, 100 warm-up steps, 3M tokens per domain (366 steps
+      per phase), normal order.
+
+    Forgetting / final avg loss, 3 seeds:
+
+    | Run | Forgetting | Final avg loss |
+    |---|---|---|
+    | Normal MoE | 0.183 ± 0.009 | 2.307 ± 0.006 |
+    | Grow on detection | 0.227 ± 0.014 | 2.353 ± 0.010 |
+    | Normal MoE + 5% replay | **0.042 ± 0.003** | **2.217 ± 0.001** |
+    | Grow + seen-token freeze | 0.200 ± 0.021 | 2.522 ± 0.009 |
+
+    - Detection is unchanged: 12/12 boundaries, 2 steps late, no false
+      triggers.
+    - Forgetting is ~8× smaller than when training from scratch, but the
+      ranking is the same.
+    - 5% replay removes 77% of the forgetting and has the best final loss.
+    - Growth is worse in every seed, by 24% more forgetting: the largest gap
+      in any setting. A likely cause, not tested: the new experts are randomly
+      initialised beside four copies of a pretrained MLP.
+    - **Seen-token freezing stops helping**: +9% forgetting and +0.21 final
+      loss.
+      - It almost removes code forgetting (0.037 vs 0.106).
+      - But stories forgetting *rises* (0.363 vs 0.261) even though router
+        leak is only 15%.
+      - New domains are learned worse (code 1.84 vs 1.61, math 3.58 vs 3.20
+        at the end of their phases).
+      - A likely cause, not tested: here the "unseen" embedding rows it
+        leaves trainable are pretrained and tied to the output layer. Training
+        them on code shifts the output distribution for stories (the
+        embedding path of finding 6).
 
 ## Figures (`results/figures/`)
 
@@ -262,9 +346,13 @@ Two details that apply to every growth run:
    drift, with detector firings marked.
 10. `10_drift_detector.png` — the same drift runs with the long-horizon drift
     detector added, against the spike detector alone.
+11. `11_robustness.png` — growth, 5% replay and seen-token freezing compared
+    with the normal MoE in four settings (22M, 101M, reversed order,
+    pretrained GPT-2). Forgetting is shown as a % change and final loss as a
+    difference, paired by seed.
 
 ## Open / in progress
 
 - Experiments complete; remaining work is the write-up.
-- Not started: expert pruning, GPT-2 (pretrained, upcycled) runs, learning-rate re-warm for the
-  replay baseline.
+- Not started: expert pruning; a detector for shifts that lower the loss
+  (finding 18); the GPT-2 growth and seen-freeze causes suggested in finding 20.

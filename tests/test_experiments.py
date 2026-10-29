@@ -276,6 +276,31 @@ def test_grow_adds_one_expert_per_layer_with_exact_param_count():
     assert m.num_experts == 6
 
 
+def test_grow_init_gpt_and_copy():
+    m = _tiny_model()
+    opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
+    m(torch.randint(0, VOCAB, (4, SEQ)))            # sets each layer's routing load
+    layer = m.blocks[0].moe
+    load = layer.last_stats["load"]
+    busiest = layer.experts[max(range(len(load)), key=load.__getitem__)]
+    m.grow(opt, "C", init="copy")
+    new = layer.experts[4]
+    assert all(torch.equal(a, b) for a, b in zip(new.parameters(), busiest.parameters()))
+    assert new.fc1.weight.data_ptr() != busiest.fc1.weight.data_ptr()   # a copy, not shared
+    # the optimizer trains the copied tensors (re-initialised in place)
+    assert any(new.fc1.weight is p for g in opt.param_groups for p in g["params"])
+    m.grow(opt, "G", init="gpt")
+    g = layer.experts[5]
+    assert torch.count_nonzero(g.fc1.bias) == 0 and torch.count_nonzero(g.fc2.bias) == 0
+    assert abs(g.fc1.weight.std().item() - 0.02) < 0.003
+    try:
+        m.grow(opt, "X", source=expert_source(D_MODEL, 16, "Small"), init="gpt")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("init='gpt' must reject a custom source")
+
+
 # ---------------------------------------------------------------------------
 # Freezing
 # ---------------------------------------------------------------------------
@@ -397,6 +422,42 @@ def test_signal_detector_stays_silent_without_a_shift():
         run(_cfg(root, name="quiet", arm="signal", confirm_steps=3, domains=["a", "a", "a"]),
             seed=0)
         assert _events(root, "quiet") == []
+
+
+def test_drop_detector_catches_switch_to_easier_data():
+    with _TmpDir() as td:
+        root = Path(td)
+        _write_data(root)
+        # "n" uses 10 tokens, "w" the whole vocabulary (ln 10 vs ln 600): leaving
+        # a mostly-"w" mixture for pure "n" makes the loss fall at once. (A 50/50
+        # mix would not do: its per-batch row-count noise is too large.)
+        rng = np.random.default_rng(1)
+        for name, hi in (("n", 10), ("w", VOCAB)):
+            for split in ("train", "val"):
+                np.save(root / f"{name}_{split}.npy",
+                        rng.integers(0, hi, size=40_000).astype(np.uint16))
+        doms = ["n:0.1+w:0.9", "n"]
+        run(_cfg(root, name="nodrop", arm="signal", confirm_steps=3, domains=doms), seed=0)
+        assert _events(root, "nodrop") == []          # the spike detector cannot see it
+        run(_cfg(root, name="drop", arm="signal", confirm_steps=3, domains=doms,
+                 detect_drops=True, drop_warmup=30), seed=0)
+        ev = _events(root, "drop")
+        assert [e["reason"] for e in ev] == ["loss_drop"], ev
+        assert 42 <= ev[0]["step"] < 50 and ev[0]["z"] < 0, ev
+
+
+def test_drop_detector_is_silent_on_rising_shifts_and_no_shift():
+    with _TmpDir() as td:
+        root = Path(td)
+        _write_data(root)
+        base = run(_cfg(root, name="b", arm="signal", confirm_steps=3), seed=0)
+        both = run(_cfg(root, name="d", arm="signal", confirm_steps=3,
+                        detect_drops=True, drop_warmup=30), seed=0)
+        assert [e["reason"] for e in _events(root, "d")] == ["loss_spike"] * 2
+        assert both["final"] == base["final"]          # never fired: bit-identical run
+        run(_cfg(root, name="q", arm="signal", confirm_steps=3, domains=["a", "a", "a"],
+                 detect_drops=True, drop_warmup=30), seed=0)
+        assert _events(root, "q") == []
 
 
 def test_lr_rewarm_restarts_schedule_each_phase():

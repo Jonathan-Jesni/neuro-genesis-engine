@@ -1,0 +1,14 @@
+# How grown experts are initialised: GPT-style normal(0.02) like the initial
+# experts (ginit), or a copy of each layer's busiest expert (copy). All earlier
+# growth runs used PyTorch's default init. Compare toy_D and gpt2_D: does the
+# init explain why growth lost to the normal MoE, most of all on GPT-2?
+
+toy_D_ginit      configs/toy_D.yaml       0  --set confirm_steps=3 --set grow_init=gpt
+toy_D_copy       configs/toy_D.yaml       0  --set confirm_steps=3 --set grow_init=copy
+gpt2_D_copy      configs/toy_D.yaml       0  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set confirm_steps=3 --set grow_init=copy
+toy_D_ginit      configs/toy_D.yaml       1  --set confirm_steps=3 --set grow_init=gpt
+toy_D_copy       configs/toy_D.yaml       1  --set confirm_steps=3 --set grow_init=copy
+gpt2_D_copy      configs/toy_D.yaml       1  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set confirm_steps=3 --set grow_init=copy
+toy_D_ginit      configs/toy_D.yaml       2  --set confirm_steps=3 --set grow_init=gpt
+toy_D_copy       configs/toy_D.yaml       2  --set confirm_steps=3 --set grow_init=copy
+gpt2_D_copy      configs/toy_D.yaml       2  --set init_from=pretrained/gpt2_dense_fp16.pt --set model.d_model=768 --set model.n_layer=12 --set model.n_head=12 --set model.d_ff=3072 --set model.gelu_approx=tanh --set lr=2e-4 --set warmup_steps=100 --set tokens_per_phase=3000000 --set confirm_steps=3 --set grow_init=copy

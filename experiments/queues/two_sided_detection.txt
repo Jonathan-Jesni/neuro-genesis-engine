@@ -1,0 +1,14 @@
+# Two-sided detection: the spike detector plus a drop detector (same z-score
+# test on the negated loss, off for the first 300 steps). Can it catch the
+# math -> code switch that lowers the loss (finding 18), without false alarms
+# on the normal order or on unchanged data? Compare ord_D, toy_D, shift_none.
+
+ord_D_drop       configs/toy_D.yaml       0  --set confirm_steps=3 --set detect_drops=true --set domains=[math,code,stories]
+toy_D_drop       configs/toy_D.yaml       0  --set confirm_steps=3 --set detect_drops=true
+shift_none_drop  configs/toy_D.yaml       0  --set confirm_steps=3 --set detect_drops=true --set domains=[stories,stories]
+ord_D_drop       configs/toy_D.yaml       1  --set confirm_steps=3 --set detect_drops=true --set domains=[math,code,stories]
+toy_D_drop       configs/toy_D.yaml       1  --set confirm_steps=3 --set detect_drops=true
+shift_none_drop  configs/toy_D.yaml       1  --set confirm_steps=3 --set detect_drops=true --set domains=[stories,stories]
+ord_D_drop       configs/toy_D.yaml       2  --set confirm_steps=3 --set detect_drops=true --set domains=[math,code,stories]
+toy_D_drop       configs/toy_D.yaml       2  --set confirm_steps=3 --set detect_drops=true
+shift_none_drop  configs/toy_D.yaml       2  --set confirm_steps=3 --set detect_drops=true --set domains=[stories,stories]

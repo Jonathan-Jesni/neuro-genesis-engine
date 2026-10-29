@@ -5,9 +5,9 @@
 This repository contains two things:
 
 1. **The engine** — a Mixture-of-Experts layer whose expert count can grow *while the network is training*, plus a foundry that turns PyTorch source code (including code written by a local LLM) into validated, live experts. Originally built for the AMD Developer Hackathon ACT II.
-2. **A study of whether that is useful** — about 200 training runs of continual pretraining on an AMD Radeon Pro W7900D, comparing growth against plain training, freezing strategies, and data replay, with 3–6 seeds per setting.
+2. **A study of whether that is useful** — about 240 training runs of continual pretraining on an AMD Radeon Pro W7900D, comparing growth against plain training, freezing strategies, and data replay, with 3–6 seeds per setting.
 
-The short answer: **detecting the shift works; growing experts in response does not reduce forgetting, at any replay budget or at either model size we tested — while replaying even 1% of old data does.** The study also measures *why* growth fails and answers whether LLM-written experts beat randomly initialised ones (they don't).
+The short answer: **detecting the shift works; growing experts in response does not reduce forgetting, at any replay budget, model size, domain order or learning-rate schedule we tested, nor when starting from pretrained GPT-2 — while replaying even 1% of old data does.** The study also measures *why* growth fails and answers whether LLM-written experts beat randomly initialised ones (they don't).
 
 ## Results
 
@@ -19,7 +19,7 @@ The setup: a small MoE language model is trained on three text domains in sequen
 
 | Finding | Evidence |
 |---|---|
-| **The model detects domain changes by itself.** A rolling z-score on its own training loss caught **150 of 150** boundaries across 75 runs, always 2 steps after the change, with **zero false alarms**. | [fig 3](results/figures/3_detection.png) |
+| **The model detects domain changes by itself.** A rolling z-score on its own training loss caught **162 of 162** boundaries across 81 runs (including pretrained GPT-2), always 2 steps after the change, with **zero false alarms**. It cannot see a change that makes the loss *drop*: with the domain order reversed, the switch from math to code (which a math-trained model already finds easier) was missed in all 6 runs. | [fig 3](results/figures/3_detection.png) |
 | **It catches abrupt shifts down to about 10% of the data — but not gradual drift.** Switching 10%+ of the data to a new domain is always detected (within 2–10 steps); 5% is caught 1 time in 3; no change, never. Drifting *slowly* to 100% code is never detected by the spike detector, even though it raises the loss as much as a 25% switch that always is. | [fig 8](results/figures/8_detection_sensitivity.png), [fig 9](results/figures/9_gradual_drift.png) |
 | **A second, long-horizon detector fixes most of the drift gap at no cost.** Comparing the smoothed loss against its lowest point since the last growth catches drift to 100% code in 3/3 runs, drift to 50% in 3/3 with a 5% margin, and even drift to 25% in 2/3 with a 2% margin — with zero false alarms at every margin tested — and abrupt and normal runs are bit-identical with or without it. | [fig 10](results/figures/10_drift_detector.png) |
 | **Growing experts on detection does not reduce forgetting.** Normal MoE: 1.51 forgetting. Growing at every detected change: 1.53. Growing at the *true* boundaries (oracle): 1.54. | [fig 1](results/figures/1_tradeoff.png) |
@@ -27,22 +27,23 @@ The setup: a small MoE language model is trained on three text domains in sequen
 | **Best method that stores no old data: freeze the embeddings of already-seen tokens.** −30% forgetting at 22M params, −44% at 101M — but always at a cost in learning the new domains. | [fig 6](results/figures/6_scale.png) |
 | **Replay wins at every budget.** Mixing 1% old data into each batch halves forgetting; 5% removes 75–81%. Adding expert growth on top changes nothing, and adding freezing makes the final loss worse at every budget. | [fig 5](results/figures/5_replay_budget.png) |
 | **The conclusions hold at 4.5× the model size** (22M → 101M parameters). | [fig 6](results/figures/6_scale.png) |
+| **…and across the robustness checks.** With the domain order reversed, and when starting from pretrained GPT-2 (124M, upcycled to an MoE), growth is again worse than the normal MoE in every seed and 5% replay again removes 77–81% of forgetting. Seen-token freezing is the one method that depends on the setting: it beats the normal MoE on final loss in reversed order, but does not help at all on pretrained GPT-2. Restarting the learning-rate schedule at each domain adds forgetting at every replay budget. | [fig 11](results/figures/11_robustness.png) |
 | **LLM-written experts are no better than random ones of the same size.** Gemma-2-2b-it designs vs size-matched random-init experts: no significant difference over 6 seeds (p = 0.27 forgetting, p = 0.30 final loss). Expert *size* does matter (p = 0.024 / 0.010). | [fig 7](results/figures/7_expert_source.png) |
 
 ![Forgetting and final loss vs replay budget](results/figures/5_replay_budget.png)
 
-Every number, table, and caveat is in **[`results/NOTES.md`](results/NOTES.md)** (17 findings), with all ten figures in [`results/figures/`](results/figures/).
+Every number, table, and caveat is in **[`results/NOTES.md`](results/NOTES.md)** (20 findings), with all eleven figures in [`results/figures/`](results/figures/).
 
 ## Setup
 
 | | |
 |---|---|
 | **Data** | [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) → [codeparrot-clean](https://huggingface.co/datasets/codeparrot/codeparrot-clean) (Python) → [open-web-math](https://huggingface.co/datasets/open-web-math/open-web-math); GPT-2 BPE tokens; 10M training tokens per domain (1220 steps of 32 × 256 tokens); a 1M-token held-out set per domain, split by document |
-| **Model** | GPT-style decoder, every MLP replaced by an MoE layer: 4 layers, d_model 256, 4 experts of width 1024, top-2 noisy routing — **22.4M** params. Scale check: 8 layers, d_model 512, width 2048 — **101.5M** |
-| **Methods** | normal MoE · more experts from the start · growth at the true boundaries (oracle) · growth on detection · five freezing strategies · task-free replay (a reservoir of past training windows, no domain labels) at 1/5/10/25% · Gemma-written vs random-init new experts |
+| **Model** | GPT-style decoder, every MLP replaced by an MoE layer: 4 layers, d_model 256, 4 experts of width 1024, top-2 noisy routing — **22.4M** params. Scale check: 8 layers, d_model 512, width 2048 — **101.5M**. Pretrained check: GPT-2 small with each MLP copied into 4 experts (upcycling), 3M tokens per domain |
+| **Methods** | normal MoE · more experts from the start · growth at the true boundaries (oracle) · growth on detection · five freezing strategies · task-free replay (a reservoir of past training windows, no domain labels) at 1/5/10/25% · Gemma-written vs random-init new experts · reversed domain order · learning-rate re-warming per domain |
 | **Metrics** | held-out loss per domain at the end of each phase; **forgetting** = final loss on a domain − its loss at the end of its own phase; detection delay and false triggers |
 | **Rigour** | 3 seeds per setting (6 for the closest comparison), mean ± std, Welch t-tests where it matters; bit-exact reproducibility verified across containers |
-| **Hardware** | AMD Radeon Pro W7900D (48 GB) via AMD's cloud, ROCm PyTorch; ~4 min per 22M run, ~10 min per 101M run |
+| **Hardware** | AMD Radeon Pro W7900D (48 GB) via AMD's cloud, ROCm PyTorch; ~4 min per 22M run, ~10 min per 101M run, ~6 min per GPT-2 run |
 
 ## Reproducing the experiments
 
@@ -85,13 +86,15 @@ bash experiments/run_queue.sh experiments/queues/replay_budget.txt
 | `detection_sensitivity.txt` | 15 (detection sensitivity) |
 | `gradual_drift.txt` | 16 (gradual drift) |
 | `drift_detector.txt` | 17 (drift-aware detector, margin sweep) |
-| `domain_order.txt`, `lr_rewarm.txt`, `gpt2.txt` | robustness checks: domain order, LR re-warming, pretrained GPT-2 (results pending) |
+| `domain_order.txt` | 18 (reversed domain order) |
+| `lr_rewarm.txt` | 19 (learning-rate re-warming) |
+| `gpt2.txt` | 20 (pretrained GPT-2; first run `python -m experiments.upcycle convert` to fetch and convert the weights) |
 
 **4. Tables and figures:**
 
 ```bash
 python -m experiments.summarize results                         # mean ± std table over seeds
-python -m experiments.analyze --paper --out results/figures     # regenerate published figures 1-10
+python -m experiments.analyze --paper --out results/figures     # regenerate published figures 1-11
 python -m experiments.analyze --fig tradeoff --arms toy_A toy_D toy_D_seen toy_A_replay   # any custom subset
 ```
 
@@ -129,7 +132,7 @@ A 300-step run on a synthetic regression task that injects an out-of-distributio
 pytest tests/ -v        # 69 passed, 1 skipped (the opt-in live Gemma test)
 ```
 
-69 offline tests, no GPU or network needed. 44 cover the engine: gate concurrency, optimizer remapping, foundry validation and rollback, the orchestrator's retry and checkpoint logic, and the Gemma prompt/extraction code. 25 cover the experiment code on tiny synthetic data: every freezing mode, the replay buffer and fractional budgets, learning-rate re-warming, mixture and gradual-drift phases, order-independent held-out evaluation, loading pretrained GPT-2 weights into the experts, growth with generated and size-matched experts, both detectors firing and staying silent, and bit-exact reproducibility. Every test file also runs standalone (`python tests/test_experiments.py`). The live test loads the real model: `NGEN_RUN_GEMMA_LIVE=1 pytest tests/test_gemma_generator.py`.
+72 offline tests, no GPU or network needed. 44 cover the engine: gate concurrency, optimizer remapping, foundry validation and rollback, the orchestrator's retry and checkpoint logic, and the Gemma prompt/extraction code. 28 cover the experiment code on tiny synthetic data: every freezing mode, the replay buffer and fractional budgets, learning-rate re-warming, mixture and gradual-drift phases, order-independent held-out evaluation, loading pretrained GPT-2 weights into the experts, growth with generated, size-matched, GPT-initialised and copied experts, all three detectors (spike, drift, loss drop) firing and staying silent, and bit-exact reproducibility. Every test file also runs standalone (`python tests/test_experiments.py`). The live test loads the real model: `NGEN_RUN_GEMMA_LIVE=1 pytest tests/test_gemma_generator.py`.
 
 ### AMD hardware and Docker
 
@@ -152,10 +155,10 @@ docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video --group-ad
 
 **Of the study**
 
-- **Small models, short training.** 22M and 101M parameters, trained from scratch on 30M tokens. The conclusions held across that 4.5× range, but we did not test pretrained models or billions of tokens, where the trade-offs could differ (seen-token freezing, for one, got relatively better with size).
+- **Small models, short training.** 22M and 101M parameters trained from scratch on 30M tokens, plus GPT-2 small (124M, pretrained) on 9M tokens. The conclusions held across all of these, but nothing at billions of parameters or tokens, where the trade-offs could differ. Seen-token freezing in particular changed with the setting: relatively better at 101M, useless on pretrained GPT-2.
 - **Detection has limits.** Abrupt changes are caught down to about a 10% shift. The spike detector alone misses gradual drift entirely; the added drift detector catches drift down to 25% code at a 2% margin, but not reliably (2/3), and margins below 2% (where false alarms would presumably start) were not tested.
-- **One detector.** A loss z-score with a fixed threshold (z > 4 for 3 steps). Other signals (routing entropy, expert load) were logged but not compared.
-- **The replay baseline has no learning-rate re-warming**, which published continual-pretraining recipes add; it already dominates without it.
+- **One detector.** A loss z-score with a fixed threshold (z > 4 for 3 steps), which by design only sees shifts that make the loss rise; a shift to easier data goes unnoticed (finding 18). Other signals (routing entropy, expert load) were logged but not compared.
+- **Three domains, one order each way.** Forward and reversed order were tested; other orders and longer domain sequences were not.
 - **Gemma's designs had little variety** (nearly all LayerNorm → 256→128 → 128→256), so "LLM-written vs random" was tested on a narrow range of designs.
 - **Grown experts start from a different initialisation** than the model's initial experts (PyTorch's default vs GPT-style std 0.02). All growth variants share it, so they compare fairly with each other; growth-vs-static comparisons include the difference.
 
@@ -185,8 +188,8 @@ experiments/
 configs/                     base configs for each method
 results/
   NOTES.md                   every finding with full tables
-  figures/                   the ten result figures
-tests/                       69 offline tests + 1 opt-in live Gemma test
+  figures/                   the eleven result figures
+tests/                       72 offline tests + 1 opt-in live Gemma test
 .agents/skills/              usage contracts for the gate, foundry and optimizer remap
 demo.py, resume_demo.py      GPU smoke check; resume the orchestrator demo
 orchestrator_viz.html        animated playback of the AMD-hardware demo run
@@ -198,6 +201,8 @@ Dockerfile                   ROCm container with Gemma baked in, build-gated by 
 - N. Shazeer et al., [Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer](https://arxiv.org/abs/1701.06538) (2017) — the gating.
 - W. Chen et al., [Lifelong Language Pretraining with Distribution-Specialized Experts](https://arxiv.org/abs/2305.12281) (2023) — growing experts at known distribution boundaries; the closest prior work.
 - [Continual Pre-training of MoEs: How Robust Is Your Router?](https://arxiv.org/abs/2503.05029) (2025) — replay and router behaviour in continual MoE pretraining.
+- A. Ibrahim et al., [Simple and Scalable Strategies to Continually Pre-train Large Language Models](https://arxiv.org/abs/2403.08763) (2024) — learning-rate re-warming plus replay.
+- A. Komatsuzaki et al., [Sparse Upcycling: Training Mixture-of-Experts from Dense Checkpoints](https://arxiv.org/abs/2212.05055) (2023) — copying a dense MLP into every expert.
 - Expert generation uses [google/gemma-2-2b-it](https://huggingface.co/google/gemma-2-2b-it) (gated; Google's Gemma license).
 
 ## License
