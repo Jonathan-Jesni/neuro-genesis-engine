@@ -5,7 +5,7 @@
 This repository contains two things:
 
 1. **The engine** — a Mixture-of-Experts layer whose expert count can grow *while the network is training*, plus a foundry that turns PyTorch source code (including code written by a local LLM) into validated, live experts. Originally built for the AMD Developer Hackathon ACT II.
-2. **A study of whether that is useful** — about 260 training runs of continual pretraining on an AMD Radeon Pro W7900D, comparing growth against plain training, freezing strategies, and data replay, with 3–6 seeds per setting.
+2. **A study of whether that is useful** — about 290 training runs of continual pretraining on an AMD Radeon Pro W7900D, comparing growth against plain training, freezing strategies, and data replay, with 3–6 seeds per setting.
 
 The short answer: **detecting the shift works; growing experts in response does not reduce forgetting, at any replay budget, model size, domain order or learning-rate schedule we tested, nor when starting from pretrained GPT-2 — while replaying even 1% of old data does.** The study also measures *why* growth fails and answers whether LLM-written experts beat randomly initialised ones (they don't).
 
@@ -19,10 +19,10 @@ The setup: a small MoE language model is trained on three text domains in sequen
 
 | Finding | Evidence |
 |---|---|
-| **The model detects domain changes by itself.** A rolling z-score on its own training loss caught **162 of 162** boundaries across 81 runs (including pretrained GPT-2), always 2 steps after the change, with **zero false alarms**. On its own it cannot see a change that makes the loss *drop*: with the domain order reversed, the switch from math to code (which a math-trained model already finds easier) was missed in all 6 runs. The same test run on the falling side catches it in 2 of 3 runs, with zero false alarms (it never fired in no-shift or normal-order runs, which stay bit-identical). | [fig 3](results/figures/3_detection.png) |
+| **The model detects domain changes by itself.** A rolling z-score on its own training loss caught **162 of 162** boundaries across 81 runs (including pretrained GPT-2), always 2 steps after the change, with **zero false alarms**. On its own it cannot see a change that makes the loss *drop*: with the domain order reversed, the switch from math to code (which a math-trained model already finds easier) was missed in all 6 runs. The same test run on the falling side catches it in 5 of 6 runs, with zero false alarms (it never fired in no-shift or normal-order runs, which stay bit-identical); replayed offline, a slightly lower threshold for drops catches all of them. | [fig 3](results/figures/3_detection.png) |
 | **It catches abrupt shifts down to about 10% of the data — but not gradual drift.** Switching 10%+ of the data to a new domain is always detected (within 2–10 steps); 5% is caught 1 time in 3; no change, never. Drifting *slowly* to 100% code is never detected by the spike detector, even though it raises the loss as much as a 25% switch that always is. | [fig 8](results/figures/8_detection_sensitivity.png), [fig 9](results/figures/9_gradual_drift.png) |
 | **A second, long-horizon detector fixes most of the drift gap at no cost.** Comparing the smoothed loss against its lowest point since the last growth catches drift to 100% code in 3/3 runs, drift to 50% in 3/3 with a 5% margin, and even drift to 25% in 2/3 with a 2% margin — with zero false alarms at every margin tested — and abrupt and normal runs are bit-identical with or without it. | [fig 10](results/figures/10_drift_detector.png) |
-| **Growing experts on detection does not reduce forgetting.** Normal MoE: 1.51 forgetting. Growing at every detected change: 1.53. Growing at the *true* boundaries (oracle): 1.54. Starting each new expert as a copy of an existing one instead of random weights removes growth's extra forgetting (1.50 at 22M; on GPT-2 0.182 vs 0.227) — but that only brings it level with not growing at all. | [fig 1](results/figures/1_tradeoff.png) |
+| **Growing experts on detection does not reduce forgetting.** Normal MoE: 1.51 forgetting. Growing at every detected change: 1.53. Growing at the *true* boundaries (oracle): 1.54. Starting each new expert as a copy of an existing one instead of random weights removes growth's extra forgetting at 22M, 101M, in reversed order, with replay and on GPT-2 — but that only brings it level with not growing at all. On GPT-2 with freezing, the same copied expert backfires: the router sends 67% of old text to it and forgetting nearly doubles. | [fig 1](results/figures/1_tradeoff.png) |
 | **Why: two shared paths leak.** With every old weight frozen, the router still sends old-domain tokens to the new experts (32% → 68% as more experts are added; correlation with forgetting r = 0.80), and the token embeddings — shared by every domain, and tied to the output layer — drift. | [fig 4](results/figures/4_router_leak.png) |
 | **Best method that stores no old data: freeze the embeddings of already-seen tokens.** −30% forgetting at 22M params, −44% at 101M — but always at a cost in learning the new domains. | [fig 6](results/figures/6_scale.png) |
 | **Replay wins at every budget.** Mixing 1% old data into each batch halves forgetting; 5% removes 75–81%. Adding expert growth on top changes nothing, and adding freezing makes the final loss worse at every budget. | [fig 5](results/figures/5_replay_budget.png) |
@@ -32,7 +32,7 @@ The setup: a small MoE language model is trained on three text domains in sequen
 
 ![Forgetting and final loss vs replay budget](results/figures/5_replay_budget.png)
 
-Every number, table, and caveat is in **[`results/NOTES.md`](results/NOTES.md)** (23 findings), with all eleven figures in [`results/figures/`](results/figures/).
+Every number, table, and caveat is in **[`results/NOTES.md`](results/NOTES.md)** (24 findings), with all eleven figures in [`results/figures/`](results/figures/).
 
 ## Setup
 
@@ -92,7 +92,9 @@ bash experiments/run_queue.sh experiments/queues/replay_budget.txt
 | `two_sided_detection.txt` | 21 (detecting shifts that lower the loss) |
 | `grown_expert_init.txt` | 22 (how new experts are initialised) |
 | `gpt2_embeddings.txt` | 23 (which embeddings to freeze on GPT-2) |
-| `gpt2_copy_init.txt` | copied experts + freezing on GPT-2 (in progress) |
+| `drop_detection_steps.txt` | 21 (more seeds; per-step logging of the missed drop) |
+| `copy_init_generality.txt` | 22 (copied experts at 101M, reversed order, with replay and seen-token freezing) |
+| `gpt2_copy_init.txt` | 24 (copied experts + freezing on GPT-2) |
 
 **4. Tables and figures:**
 
@@ -161,10 +163,10 @@ docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video --group-ad
 
 - **Small models, short training.** 22M and 101M parameters trained from scratch on 30M tokens, plus GPT-2 small (124M, pretrained) on 9M tokens. The conclusions held across all of these, but nothing at billions of parameters or tokens, where the trade-offs could differ. Seen-token freezing in particular changed with the setting: relatively better at 101M, useless on pretrained GPT-2.
 - **Detection has limits.** Abrupt changes are caught down to about a 10% shift. The spike detector alone misses gradual drift entirely; the added drift detector catches drift down to 25% code at a 2% margin, but not reliably (2/3), and margins below 2% (where false alarms would presumably start) were not tested.
-- **One kind of detector.** A loss z-score with a fixed threshold (z > 4 for 3 steps). Run on the rising side alone it misses a shift to easier data (finding 18); the added falling-side copy caught that shift in only 2 of 3 runs, because a step down is smaller than a step up (finding 21). Other signals (routing entropy, expert load) were logged but not compared.
+- **One kind of detector.** A loss z-score with a fixed threshold (z > 4 for 3 steps). Run on the rising side alone it misses a shift to easier data (finding 18); the added falling-side copy caught that shift in 5 of 6 runs, because a step down is smaller than a step up; a lower drop threshold (z > 3) catches all of them in an offline replay, but was not tested in a training run (finding 21). Other signals (routing entropy, expert load) were logged but not compared.
 - **Three domains, one order each way.** Forward and reversed order were tested; other orders and longer domain sequences were not.
 - **Gemma's designs had little variety** (nearly all LayerNorm → 256→128 → 128→256), so "LLM-written vs random" was tested on a narrow range of designs.
-- **Grown experts start from a different initialisation** than the model's initial experts (PyTorch's default vs GPT-style std 0.02) in every run before finding 22. That init is what made growth slightly *worse* than not growing; copying an existing expert removes the penalty but gives no gain (finding 22). Copy init was tested with plain growth only, not with freezing or replay.
+- **Grown experts start from a different initialisation** than the model's initial experts (PyTorch's default vs GPT-style std 0.02) in every run before finding 22. That init is what made growth slightly *worse* than not growing; copying an existing expert removes the penalty but gives no gain (finding 22). Copy init is harmless without freezing but harmful with freezing on GPT-2 (finding 24).
 
 **Of the engine**
 

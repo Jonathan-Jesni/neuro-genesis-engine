@@ -350,7 +350,8 @@ SCALE_SIZES = [("toy", "22M params", "#93c5fd"), ("big", "101M params", "#1d4ed8
 ROBUST_SETTINGS = [("toy", "22M", "#93c5fd"), ("big", "101M", "#1d4ed8"),
                    ("ord", "22M, reversed order", "#f59e0b"),
                    ("gpt2", "GPT-2 (pretrained)", "#7c3aed")]
-ROBUST_ARMS = [("D", "Grow on\ndetection"), ("A_r05", "Normal MoE\n+ 5% replay"),
+ROBUST_ARMS = [("D", "Grow on\ndetection"), ("D_copy", "Grow, copied\nexpert"),
+               ("A_r05", "Normal MoE\n+ 5% replay"),
                ("D_seen", "Grow + seen-\ntoken freeze")]
 
 
@@ -672,7 +673,7 @@ PAPER_FIGURES = [
     ("9_gradual_drift.png", "drift", ["shift_q50", "drift_q50", "drift_q100"]),
     ("10_drift_detector.png", "drift", ["drift_q100", "dd_drift_q100", "dd_drift_q50"]),
     ("11_robustness.png", "robustness",
-     [f"{p}_{a}" for p, _, _ in ROBUST_SETTINGS for a in ("A", "D", "A_r05", "D_seen")]),
+     [f"{p}_{a}" for p, _, _ in ROBUST_SETTINGS for a in ("A", "D", "D_copy", "A_r05", "D_seen")]),
 ]
 
 

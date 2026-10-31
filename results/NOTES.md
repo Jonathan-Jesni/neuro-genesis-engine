@@ -57,7 +57,7 @@ Two details that apply to every growth run:
    exactly 2 steps late, with zero false triggers (fig 3). The 6 pretrained
    GPT-2 growth runs add 12/12 more (finding 20). The one exception is a shift
    that *lowers* the loss, which a spike detector cannot see (finding 18). A
-   second detector on the falling side catches it in 2 of 3 seeds, with no
+   second detector on the falling side catches it in 5 of 6 seeds, with no
    false alarms (finding 21). Without the rule, 1 of 3
    seeds fired on a noisy batch (z = 4.04) 8 steps early and its 300-step
    cooldown masked the real boundary.
@@ -329,18 +329,36 @@ Two details that apply to every growth run:
         trainable are pretrained and tied to the output layer. Finding 23
         tests this and rules it out.
 21. **A drop detector catches shifts that lower the loss, with no false
-    alarms** (`two_sided_detection.txt`).
+    alarms** (`two_sided_detection.txt`, `drop_detection_steps.txt`).
     - Method: a second copy of the same z-test runs on the *negated* loss
       (`detect_drops=true`). It is silent for the first 300 steps
       (`drop_warmup`), while the loss is still falling fast.
-    - Reversed order: math → code was caught in 2 of 3 seeds, at 3 and 4 steps
-      late (z = −8.5 and −5.7). Code → stories was caught in 3/3 as before. In
-      total that is 5/6 boundaries, up from 3/6.
-    - The third seed missed the drop even though its loss fell by as much as
-      in the other two. The step down is smaller than an upward switch: ~0.8
-      nats here, against ~4 for code → stories. It needs 3 steps in a row past
-      z = 4, so it is borderline. Only 20-step loss averages are logged, so the
-      exact per-step z for that seed cannot be recovered.
+    - Reversed order, 6 seeds: math → code was caught in 5, 2–5 steps late
+      (z between −5.1 and −8.5). Code → stories was caught in 6/6 as before.
+      In total that is 11/12 boundaries, up from 6/12.
+    - The step down is smaller than an upward switch: ~0.8 nats here, against
+      ~4 for code → stories, so the drop side runs closer to the threshold.
+    - Why seed 1 missed: it was re-run with per-step loss logging (bit-identical
+      to the original run). Its loss fell more gradually over the first code
+      steps, and its math loss just before was noisier. The z-scores of the
+      first code steps were 3.4, 3.2, 4.8, 3.8, 3.7, 4.0: never 3 in a row
+      above 4.
+    - Lower thresholds, replayed offline on the per-step losses. The replay at
+      z > 4 reproduces the real firings exactly. Drop side only, 3 steps in a
+      row; 4 reversed-order seeds, plus 5 controls with no loss-lowering shift
+      (3 no-shift, 2 normal-order):
+
+      | Drop threshold | math → code caught | False alarms in controls |
+      |---|---|---|
+      | z > 4 (used) | 3/4 | 0/5 |
+      | z > 3.5 | 4/4 | 0/5 |
+      | z > 3 | 4/4, all exactly 2 steps late | 0/5 |
+      | z > 2.5 | 4/4 | 3/5 (at step 381, just after the warm-up) |
+
+      A drop threshold of 3 would have caught every seed with no false alarm.
+      This is offline and on few runs, and a real run with that setting was
+      not trained. Requiring only 2 steps in a row at z > 3 already gave false
+      alarms in 2 of the 5 controls.
     - No false alarms. The normal-order runs (3 seeds) and the no-shift runs
       (stories → stories, 3 seeds) are **bit-identical** to the same runs
       without the drop detector: it never fired.
@@ -373,6 +391,19 @@ Two details that apply to every growth run:
       not the size of the random weights.
     - Even the best grown expert only matches not growing. Growth on its own
       still has no benefit here.
+    - The match holds in every other setting tried (`copy_init_generality.txt`,
+      fig 11). Forgetting / final avg loss, 3 seeds:
+
+      | Setting | Grow, copy init | Grow, default init | Normal MoE |
+      |---|---|---|---|
+      | 101M | 1.494 ± 0.024 / 4.113 ± 0.041 | 1.536 / 4.143 | 1.494 / 4.110 |
+      | Reversed order | 2.737 ± 0.109 / 5.252 ± 0.084 | 2.823 / 5.309 | 2.711 / 5.238 |
+      | 22M + 5% replay | 0.368 ± 0.004 / 3.582 ± 0.004 | 0.381 / 3.593 | 0.373 / 3.585 |
+      | GPT-2 + 5% replay | 0.047 ± 0.002 / 2.222 ± 0.001 | — | 0.042 / 2.217 |
+
+    - With seen-token freezing at 22M, copy init also helps: 0.947 ± 0.085 /
+      4.656 ± 0.088, against 1.066 / 4.774 with default init. That is still far
+      behind replay. On GPT-2 the same combination fails badly (finding 24).
 23. **On GPT-2, freezing hurts more the more is frozen. Trainable embeddings
     are not what causes forgetting** (`gpt2_embeddings.txt`). All three runs
     grow on detection and freeze every old MLP, attention and router weight.
@@ -398,6 +429,33 @@ Two details that apply to every growth run:
       and still damages stories through the experts' shared output. The
       freezing-based methods therefore only paid off when training from
       scratch.
+24. **On GPT-2, a copied expert plus freezing nearly doubles forgetting,
+    through the router** (`gpt2_copy_init.txt`). Same freezing runs as
+    finding 23, but each new expert starts as a copy of the busiest one.
+    3 seeds:
+
+    | Run | Avg forgetting | Stories forgetting | Final avg | Stories routed to new experts |
+    |---|---|---|---|---|
+    | freeze all, default init | 0.250 ± 0.022 | 0.467 | 2.587 | 17% |
+    | freeze all, copy init | 0.440 ± 0.013 | 0.687 | 2.604 | **67%** |
+    | seen-token freeze, default init | 0.200 ± 0.021 | 0.363 | 2.522 | 15% |
+    | seen-token freeze, copy init | 0.436 ± 0.013 | 0.665 | 2.592 | **67%** |
+
+    - A copied expert computes the same function as a pretrained one, so the
+      router is as happy to send old tokens to it. Two thirds of stories
+      tokens end up in the new experts.
+    - The new experts are the only MLPs being trained on code and math. So
+      stories is processed by weights that are being overwritten, which is
+      the router leak of finding 5 at its most extreme.
+    - A random new expert is mostly ignored by a router trained on pretrained
+      experts, which is what limited its leak to ~16%.
+    - At 22M the same copy init did *not* raise the leak (51% vs 48%, finding
+      22). There the router had no strong pretrained preference to begin
+      with.
+    - So under freezing, how a new expert starts decides how much old data it
+      captures. Without freezing, copy init is harmless (finding 22): the
+      original experts are trained too, so nothing is protected or lost by
+      routing to the copy.
 
 ## Figures (`results/figures/`)
 
@@ -420,15 +478,14 @@ Two details that apply to every growth run:
    drift, with detector firings marked.
 10. `10_drift_detector.png` — the same drift runs with the long-horizon drift
     detector added, against the spike detector alone.
-11. `11_robustness.png` — growth, 5% replay and seen-token freezing compared
+11. `11_robustness.png` — growth (default and copied new experts), 5% replay
+    and seen-token freezing compared
     with the normal MoE in four settings (22M, 101M, reversed order,
     pretrained GPT-2). Forgetting is shown as a % change and final loss as a
     difference, paired by seed.
 
 ## Open / in progress
 
-- Running: copy-initialised growth combined with freezing on GPT-2
-  (`gpt2_copy_init.txt`). It tests whether copied experts rescue finding 23.
-- Not started: expert pruning; per-step loss logging around boundaries
-  (needed to explain the missed drop in finding 21).
+- Not started: expert pruning; a trained run with the drop threshold at
+  z = 3 (finding 21 tests it only offline).
 - Remaining work is the write-up.
