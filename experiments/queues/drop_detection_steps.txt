@@ -1,0 +1,8 @@
+# Why the drop detector missed math -> code in seed 1 (finding 21): rerun it with
+# per-step loss logging (log_every=1 does not change training), plus three more
+# seeds for a better detection rate.
+
+ord_D_drop_log  configs/toy_D.yaml  1  --set confirm_steps=3 --set detect_drops=true --set domains=[math,code,stories] --set log_every=1
+ord_D_drop  configs/toy_D.yaml  3  --set confirm_steps=3 --set detect_drops=true --set domains=[math,code,stories] --set log_every=1
+ord_D_drop  configs/toy_D.yaml  4  --set confirm_steps=3 --set detect_drops=true --set domains=[math,code,stories] --set log_every=1
+ord_D_drop  configs/toy_D.yaml  5  --set confirm_steps=3 --set detect_drops=true --set domains=[math,code,stories] --set log_every=1

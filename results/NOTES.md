@@ -43,6 +43,8 @@ Two details that apply to every growth run:
   init (uniform; std ≈ 0.036 for the first layer and 0.018 for the second at
   these sizes, with random biases). Comparisons between growth variants are like
   for like; comparisons between growth and static runs include this difference.
+  Finding 22 measures it: copying an existing expert instead removes growth's
+  extra forgetting entirely.
 - **Statistics.** "±" is the sample standard deviation over seeds (n − 1), in
   the tables and in the figures' error bars alike.
 
@@ -54,7 +56,9 @@ Two details that apply to every growth run:
    detector, random or Gemma-written experts, 22M and 101M params), always
    exactly 2 steps late, with zero false triggers (fig 3). The 6 pretrained
    GPT-2 growth runs add 12/12 more (finding 20). The one exception is a shift
-   that *lowers* the loss, which a spike detector cannot see (finding 18). Without the rule, 1 of 3
+   that *lowers* the loss, which a spike detector cannot see (finding 18). A
+   second detector on the falling side catches it in 2 of 3 seeds, with no
+   false alarms (finding 21). Without the rule, 1 of 3
    seeds fired on a noisy batch (z = 4.04) 8 steps early and its 300-step
    cooldown masked the real boundary.
 2. **Growth alone does not reduce forgetting.** Static (4 or 6 experts),
@@ -269,7 +273,7 @@ Two details that apply to every growth run:
       than its math loss (4.32 vs 5.15; open-web-math is full of LaTeX and
       code-like text), so the switch makes the training loss fall. A loss-spike
       detector only sees shifts that make the data look harder. There were
-      still no false triggers.
+      still no false triggers. Finding 21 adds a detector for this case.
 19. **LR re-warming at each domain makes forgetting worse at every replay
     budget** (`lr_rewarm.txt`). The warm-up + cosine schedule restarts at each
     true boundary (as in Ibrahim et al. 2024), normal MoE, 3 seeds.
@@ -311,8 +315,9 @@ Two details that apply to every growth run:
       ranking is the same.
     - 5% replay removes 77% of the forgetting and has the best final loss.
     - Growth is worse in every seed, by 24% more forgetting: the largest gap
-      in any setting. A likely cause, not tested: the new experts are randomly
-      initialised beside four copies of a pretrained MLP.
+      in any setting. The new experts are randomly initialised beside four
+      copies of a pretrained MLP. Finding 22 confirms this is the cause:
+      copying an existing expert instead removes the gap.
     - **Seen-token freezing stops helping**: +9% forgetting and +0.21 final
       loss.
       - It almost removes code forgetting (0.037 vs 0.106).
@@ -320,10 +325,79 @@ Two details that apply to every growth run:
         leak is only 15%.
       - New domains are learned worse (code 1.84 vs 1.61, math 3.58 vs 3.20
         at the end of their phases).
-      - A likely cause, not tested: here the "unseen" embedding rows it
-        leaves trainable are pretrained and tied to the output layer. Training
-        them on code shifts the output distribution for stories (the
-        embedding path of finding 6).
+      - A suspected cause was that the "unseen" embedding rows it leaves
+        trainable are pretrained and tied to the output layer. Finding 23
+        tests this and rules it out.
+21. **A drop detector catches shifts that lower the loss, with no false
+    alarms** (`two_sided_detection.txt`).
+    - Method: a second copy of the same z-test runs on the *negated* loss
+      (`detect_drops=true`). It is silent for the first 300 steps
+      (`drop_warmup`), while the loss is still falling fast.
+    - Reversed order: math → code was caught in 2 of 3 seeds, at 3 and 4 steps
+      late (z = −8.5 and −5.7). Code → stories was caught in 3/3 as before. In
+      total that is 5/6 boundaries, up from 3/6.
+    - The third seed missed the drop even though its loss fell by as much as
+      in the other two. The step down is smaller than an upward switch: ~0.8
+      nats here, against ~4 for code → stories. It needs 3 steps in a row past
+      z = 4, so it is borderline. Only 20-step loss averages are logged, so the
+      exact per-step z for that seed cannot be recovered.
+    - No false alarms. The normal-order runs (3 seeds) and the no-shift runs
+      (stories → stories, 3 seeds) are **bit-identical** to the same runs
+      without the drop detector: it never fired.
+    - Detecting the extra boundary does not help forgetting: 2.823 ± 0.082
+      vs 2.823 ± 0.107 without it. This is the same as finding 2.
+22. **Grown experts copied from an existing expert remove growth's cost, but
+    growth still gives no gain** (`grown_expert_init.txt`).
+    - `grow_init` sets how a new expert's weights start:
+      - `default`: PyTorch's default init, used in every earlier growth run.
+      - `gpt`: normal with std 0.02 and zero bias, like the initial experts.
+      - `copy`: an exact copy of the expert that took the most tokens in the
+        last batch.
+    - Forgetting / final avg loss, 3 seeds, confirm-3 detection:
+
+    | Run | 22M from scratch | Pretrained GPT-2 |
+    |---|---|---|
+    | Normal MoE (no growth) | 1.508 ± 0.010 / 4.337 ± 0.007 | 0.183 ± 0.009 / 2.307 ± 0.006 |
+    | Grow, default init | 1.529 ± 0.021 / 4.350 ± 0.018 | 0.227 ± 0.014 / 2.353 ± 0.010 |
+    | Grow, GPT-style init | 1.554 ± 0.014 / 4.368 ± 0.014 | — |
+    | Grow, copy init | 1.501 ± 0.005 / 4.329 ± 0.003 | 0.182 ± 0.008 / 2.310 ± 0.005 |
+
+    - Copy init beats default init in every seed, by 0.004–0.054 forgetting
+      at 22M and 0.04–0.05 on GPT-2.
+    - It lands on the normal MoE: the paired difference is within ±0.012 at
+      22M and ±0.004 on GPT-2.
+    - So the extra forgetting from growth in findings 2, 11 and 20 came from
+      putting a randomly initialised expert beside trained ones. This confirms
+      the cause suggested in finding 20.
+    - The GPT-style init is slightly *worse* than the default, so the cause is
+      not the size of the random weights.
+    - Even the best grown expert only matches not growing. Growth on its own
+      still has no benefit here.
+23. **On GPT-2, freezing hurts more the more is frozen. Trainable embeddings
+    are not what causes forgetting** (`gpt2_embeddings.txt`). All three runs
+    grow on detection and freeze every old MLP, attention and router weight.
+    They differ only in the token embeddings:
+
+    | Embeddings | Stories forgetting | Avg forgetting | Final avg | Code / math loss at end of own phase |
+    |---|---|---|---|---|
+    | all frozen (`fall`) | 0.467 | 0.250 ± 0.022 | 2.587 ± 0.015 | 1.93 / 3.59 |
+    | seen rows frozen (`seen`) | 0.363 | 0.200 ± 0.021 | 2.522 ± 0.009 | 1.84 / 3.58 |
+    | all trainable (`femb`) | 0.322 | 0.182 ± 0.010 | 2.482 ± 0.004 | 1.81 / 3.53 |
+    | *normal MoE, nothing frozen* | 0.261 | 0.183 ± 0.009 | 2.307 ± 0.006 | 1.61 / 3.20 |
+
+    - If trainable pretrained embedding rows were the leak, stories forgetting
+      would order fall < seen < femb. It orders exactly the other way, so that
+      explanation is ruled out.
+    - This is the opposite of the 22M model, where freezing everything forgot
+      the least (0.96) and trainable embeddings the most (1.71).
+    - Router leak is similar across the three (12–17% of stories tokens), so
+      the difference is not routing either.
+    - A plausible reading, not tested: a pretrained model needs to adapt its
+      shared weights to fit a new domain. Freezing them forces all of that
+      adaptation through a few fresh experts, which learns new domains worse
+      and still damages stories through the experts' shared output. The
+      freezing-based methods therefore only paid off when training from
+      scratch.
 
 ## Figures (`results/figures/`)
 
@@ -353,6 +427,8 @@ Two details that apply to every growth run:
 
 ## Open / in progress
 
-- Experiments complete; remaining work is the write-up.
-- Not started: expert pruning; a detector for shifts that lower the loss
-  (finding 18); the GPT-2 growth and seen-freeze causes suggested in finding 20.
+- Running: copy-initialised growth combined with freezing on GPT-2
+  (`gpt2_copy_init.txt`). It tests whether copied experts rescue finding 23.
+- Not started: expert pruning; per-step loss logging around boundaries
+  (needed to explain the missed drop in finding 21).
+- Remaining work is the write-up.
