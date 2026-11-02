@@ -311,7 +311,7 @@
       <div class="sub">Self-expanding Mixture-of-Experts &mdash; autonomous run playback</div>
     </div>
     <div class="chips">
-      <span class="chip badge">AMD HARDWARE RUN</span>
+      <span class="chip badge" id="chipSource">AMD HARDWARE RUN</span>
       <span class="chip" id="chipSteps"></span>
       <span class="chip" id="chipK"></span>
       <span class="chip" id="chipZ"></span>
@@ -1379,7 +1379,17 @@ document.addEventListener("dragover", (e) => e.preventDefault());
 document.addEventListener("drop", async (e) => {
   e.preventDefault(); dragDepth = 0; $("drop").classList.remove("on");
   const f = e.dataTransfer.files?.[0];
-  if (f) init(await f.text());
+  if (!f) return;
+  const text = await f.text();
+  init(text);
+  // A dropped log is not the AMD run: say whose it is and when it was recorded.
+  let when = "";
+  try {
+    const ts = JSON.parse(text.slice(0, text.indexOf("\n") > 0 ? text.indexOf("\n") : undefined)).ts;
+    if (ts) when = " · RECORDED " + new Date(ts * 1000).toLocaleString([], { day: "numeric", month: "short",
+      hour: "2-digit", minute: "2-digit" }).toUpperCase();
+  } catch (_) { /* first line not JSON: keep the plain label */ }
+  $("chipSource").textContent = "YOUR RUN" + when;
 });
 
 // ------------------------------ boot ------------------------------
