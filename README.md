@@ -130,7 +130,7 @@ pip install -r requirements.txt
 python -m core.orchestrator
 ```
 
-A 300-step run on a synthetic regression task that injects an out-of-distribution batch every 40 steps. Each detected spike produces a validated new expert (4 → 11 experts with the seeded template generator) and the run writes `orchestrator_run.jsonl` plus a checkpoint every 25 steps; `python resume_demo.py` continues an interrupted run. With `transformers`/`accelerate` installed and an `HF_TOKEN` for the gated [google/gemma-2-2b-it](https://huggingface.co/google/gemma-2-2b-it), the demo uses the real LLM generator instead; otherwise it falls back to the template.
+A 300-step run on a synthetic regression task that injects an out-of-distribution batch every 40 steps. Each detected spike produces a validated new expert (4 → 11 experts with the seeded template generator) and the run writes `orchestrator_run.jsonl` plus a checkpoint every 25 steps; `python resume_demo.py` continues an interrupted run. With `transformers`/`accelerate` installed and an `HF_TOKEN` for the gated [google/gemma-2-2b-it](https://huggingface.co/google/gemma-2-2b-it), the demo uses the real LLM generator instead; otherwise it falls back to the template. `NGEN_DEMO_TEMPLATE=1` forces the template even when Gemma is available (Gemma on a CPU takes minutes per expert; the template run takes about 15 s).
 
 ### Tests
 

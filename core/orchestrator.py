@@ -1445,8 +1445,11 @@ if __name__ == "__main__":
     # Prefer the REAL Gemma-backed generator; fall back to the dependency-free
     # template on any construction failure (missing transformers, no HF token,
     # GPU OOM) so the demo always runs -- including inside the ROCm container
-    # image, which deliberately ships without transformers.
+    # image, which deliberately ships without transformers. NGEN_DEMO_TEMPLATE=1
+    # forces the template (Gemma on a CPU is far too slow for a live demo).
     try:
+        if os.environ.get("NGEN_DEMO_TEMPLATE") == "1":
+            raise RuntimeError("NGEN_DEMO_TEMPLATE=1")
         generator = GemmaExpertGenerator()
         generator_name = f"GemmaExpertGenerator({generator.model_name})"
     except Exception as exc:  # noqa: BLE001 - any failure means fallback

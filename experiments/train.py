@@ -532,6 +532,8 @@ def run(cfg: dict, seed: int) -> dict:
                               -drop.z_score if fire_drop else None),
                         "drift_ratio": drift, "loss": lval,
                         "experts": model.num_experts, "domain": b.domain_id})
+                    print(f"[{run_name}] step {step+1}: {reason} detected (loss {lval:.2f}) "
+                          f"-> grew to {model.num_experts} experts per layer", flush=True)
 
             if (step + 1) % cfg["log_every"] == 0:
                 stats = model.routing_stats()
